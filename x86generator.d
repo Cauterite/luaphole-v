@@ -1,14 +1,14 @@
 /* -------------------------------------------------------------------------- */
 
-version (X86):
+version (X86) {} else {static assert(0);};
+version (D_InlineAsm_X86) {} else {static assert(0);};
 
 import Std_;
 
 import C_ = coretypes : Valº_ = Valº;
 import Ir_ = intermediate;
 import Rt_ = runtime : Rtº_ = RuntimeStateº;
-
-static assert(Valº_.sizeof == 16);
+import miscellaneous : bytes_of; // // //
 
 /* -------------------------------------------------------------------------- */
 
@@ -32,14 +32,16 @@ static assert(Valº_.sizeof == 16);
 	position-independent code
 	¯¯¯¯¯¯¯¯¯¯¯¯¯¯¯¯¯¯¯¯¯¯¯¯¯
 	generated code should not contain any references to absolute memory
-	addresses. all memory access is either relative to the current function's
-	start address or via the runtime state pointer. both these pointers are
-	available in the `self` parameter of every closure function.
+	addresses. all memory access (other than via parameters/upvals) is either
+	relative to the current function's start address or via the runtime state
+	pointer. both these pointers are available in the `self` parameter of every
+	closure function.
 */
 
 // TODO: unittest merge_append
 // TODO: funcinfoº
-// TODO: allocator for function code
+// TODO: gen_num
+// TODO: move valignment functions into misc or runtime
 
 /* --- code generators --- */
 
@@ -58,19 +60,18 @@ C_.Closureº gen_chunk(
 		`chunk;`~randomUUID_.to_!string,
 		new string[0], /* formals */
 		``, /* formal va */
-		[Body]
+		[
+			Ir_.sym_form_to_ir(Ns.SelfSym), /* force first upval */
+			Body
+		]
 	);
 	size_t UpvalC = ChunkIr.UpvalSyms.walkLength_;
 	enforce_(UpvalC <= 1, `chunk body contains multiple upvalue references`);
 
 	/* generate the function code */
 	immutable FuncCodeº Code = gen_func_body(ChunkIr).assume_unique();
-
 	/* allocate aligned memory for the code */
-	ubyte[] Payload = Rt_.valigned_malloc!ubyte(
-		Rt, Code.ValignedSize/Valignment
-	)[0 .. Code.ValignedSize];
-
+	auto Payload = cast(ubyte[]) Rt.CodeAllocator.allocate(Code.ValignedSize);
 	/* write the code into memory */
 	copy_(Code.Read, Payload);
 
@@ -113,7 +114,7 @@ private struct gen_expr {
 
 	static void opCall(Ctxº Ctx, R16º R, immutable Ir_.Irº X) {
 		debug static int Lvl;
-		debug writeln_(
+		debug (codegen) writeln_(
 			`   `.repeat_(Lvl).join_(``), typeid(cast(Object) X), ` -<`
 		);
 		debug ++Lvl;
@@ -122,12 +123,12 @@ private struct gen_expr {
 		DispatchTbl[typeid(cast(Object) X)](Ctx, R, cast(Object) X);
 
 		debug --Lvl;
-		debug writeln_(`   `.repeat_(Lvl).join_(``), `>-`);
+		debug (codegen) writeln_(`   `.repeat_(Lvl).join_(``), `>-`);
 	};
 
 	/* dynamic dispatch table */
-	private static immutable Generº[TypeInfo] DispatchTbl;
-	private alias Generº = void function(Ctxº, R16º, Object);
+	static immutable Generº[TypeInfo] DispatchTbl;
+	alias Generº = void function(Ctxº, R16º, Object);
 	shared static this() {
 		foreach (X; Generators) {
 			alias KeyTº = Unqual_!(Parameters_!X[2]);
@@ -145,12 +146,12 @@ private struct gen_expr {
 
 private void gen_nil(Ctxº C, R16º R, immutable Ir_.Nilº) {
 	/* ? */
-	gen_opaque_lit(C.Code, R, cast(uint[4]) bytes(Valº_.init));
+	gen_opaque_lit(C.Code, R, cast(uint[4]) bytes_of(Valº_.init));
 };
 
 private void gen_atom(Ctxº C, R16º R, immutable Ir_.Atomº Obj) {
 	/* ? */
-	auto V = C_.atom(Obj.Txt);
+	auto V = C_.Atomº(Obj.Txt);
 
 	/* R.Func <- &runtime.voke_atom */
 	C.put_(gen_load_self_m4!q{Runtime}(R4º.Ax));
@@ -177,14 +178,14 @@ private void gen_atom(Ctxº C, R16º R, immutable Ir_.Atomº Obj) {
 
 		/* R.LongStr <- Txt */
 		C.put_(gen_load_self_m4!q{Func}(R4º.Ax)); /* EAX <- Self.Func */
-		C.put_(op_sub_r4i4(R4º.Ax, Offset)); /* EAX -= Offset */
+		C.put_(op_add_r4i4(R4º.Ax, Offset)); /* EAX += Offset */
 		C.put_(op_insr_r16r4(R, R4º.Ax, V.LongStr.offsetof/4));
 	};
 };
 
 private void gen_utf8(Ctxº C, R16º R, immutable Ir_.Utf8º Obj) {
 	/* ? */
-	auto V = C_.utf8(Obj.Txt);
+	auto V = C_.Utf8º(Obj.Txt);
 
 	/* R.Func <- &runtime.voke_utf8 */
 	C.put_(gen_load_self_m4!q{Runtime}(R4º.Ax));
@@ -192,17 +193,17 @@ private void gen_utf8(Ctxº C, R16º R, immutable Ir_.Utf8º Obj) {
 	C.put_(op_insr_r16r4(R, R4º.Ax, V.Func.offsetof/4));
 
 	auto Txt = new BufChainº;
-	Txt.put_(cast(ubyte[]) (V.S[]));
-	ptrdiff_t Offset = C.Code.prepend(Txt.assume_unique());
+	Txt.put_(cast(ubyte[]) (V.Txt[]));
+	ptrdiff_t Offset = C.Code.prepend(Txt.assume_unique);
 
 	/* R.Ptr <- Txt */
 	C.put_(gen_load_self_m4!q{Func}(R4º.Ax)); /* EAX <- Self.Func */
-	C.put_(op_sub_r4i4(R4º.Ax, Offset)); /* EAX -= Offset */
-	C.put_(op_insr_r16r4(R, R4º.Ax, V.S.offsetof/4));
+	C.put_(op_add_r4i4(R4º.Ax, Offset)); /* EAX += Offset */
+	C.put_(op_insr_r16r4(R, R4º.Ax, V.Txt.offsetof/4));
 
 	/* R.Size <- V.Size */
-	C.put_(op_mov_r4i4(R4º.Ax, V.S.length));
-	C.put_(op_insr_r16r4(R, R4º.Ax, V.S.offsetof/4 + 1));
+	C.put_(op_mov_r4i4(R4º.Ax, V.Txt.length));
+	C.put_(op_insr_r16r4(R, R4º.Ax, V.Txt.offsetof/4 + 1));
 
 	/* R.Len <- V.Len */
 	C.put_(op_mov_r4i4(R4º.Ax, V.Len));
@@ -210,24 +211,33 @@ private void gen_utf8(Ctxº C, R16º R, immutable Ir_.Utf8º Obj) {
 };
 
 private void gen_num(Ctxº C, R16º R, immutable Ir_.Numberº Obj) {
-	auto V = C_.floht(Obj.N);
+	/* serialise the decimal */
+	auto Bytes = new BufChainº;
+	Bytes.put_(Obj.Num.to_bytes);
+	size_t BytesSize = Bytes.RawSize;
+	ptrdiff_t Offset = C.Code.prepend(Bytes.assume_unique);
 
-	/* ECX <- &runtime.voke_float */
-	C.put_(gen_load_self_m4!q{Runtime}(R4º.Cx));
-	C.put_(op_mov_r4m4(R4º.Cx, R4º.Cx, Rtº_.VokeFloat.offsetof));
+	{/* R <- dec_from_bytes(return_ptr, size, ptr) */
 
-	C.put_(op_xor_r16r16(R, R)); /* R <- 0 */
+		C.put_(op_sub_r4i4(R4º.Sp, Valº_.sizeof)); /* ESP -= 16 */
+		C.put_(op_mov_r4r4(R4º.Cx, R4º.Sp)); /* ECX <- ESP */
+	
+		/* EAX <- Bytes.ptr */
+		C.put_(gen_load_self_m4!q{Func}(R4º.Ax)); /* EAX <- Self.Func */
+		C.put_(op_add_r4i4(R4º.Ax, Offset)); /* EAX += Offset */
+	
+		C.put_(ubyte(Op1.PushR4 + R4º.Ax)); /* PUSH EAX */
+		C.put_(Op1.PushI4~bytes_of(BytesSize)); /* PUSH size */
+		C.put_(ubyte(Op1.PushR4 + R4º.Cx)); /* PUSH ECX */
+	
+		/* EAX <- &runtime.DecFromBytes */
+		C.put_(gen_load_self_m4!q{Runtime}(R4º.Ax));
+		C.put_(op_mov_r4m4(R4º.Ax, R4º.Ax, Rtº_.DecFromBytes.offsetof));
+		C.put_(op_call_r4(R4º.Ax)); /* CALL EAX */
 
-	/* R.payload = V.payload */
-	foreach (ubyte Idx; 1 .. 4) {
-		if (V.Val.Data[Idx-1] != 0) {
-			C.put_(op_mov_r4i4(R4º.Ax, V.Val.Data[Idx-1]));
-			C.put_(op_insr_r16r4(R, R4º.Ax, Idx));
-		};
+		C.put_(op_mova_r16m16(R, R4º.Sp, 12)); /* R <- [ESP + 12] */
+		C.put_(op_add_r4i4(R4º.Sp, 12 + Valº_.sizeof)); /* ESP += 28 */
 	};
-
-	/* R.Func <- &runtime.voke_float */
-	C.put_(op_insr_r16r4(R, R4º.Cx, V.Func.offsetof/4));
 };
 
 private void gen_sym(Ctxº C, R16º R, immutable Ir_.Symbolº Sym) {
@@ -251,14 +261,14 @@ private void gen_if(Ctxº C, R16º R, immutable Ir_.Ifº If) {
 	};
 
 	size_t BranchOffset = C.Code.NextOffset;
-	C.put_(bytes(Op2.JeI4)~bytes(0xffffffff)); /* if (Pred is nil) goto Else */
+	C.put_(bytes_of(Op2.JeI4)~bytes_of(0xffffffff)); /* if (!Pred) goto Else */
 
 	/* evaluate 'Then' */
 	gen_expr(C, R, If.Then);
 
 	/* jump over Else */
 	size_t JumpOffset = C.Code.NextOffset;
-	C.put_(Op1.JmpI4~bytes(0xffffffff));
+	C.put_(Op1.JmpI4~bytes_of(0xffffffff));
 
 	/* evaluate 'Else' */
 	size_t ElseOffset = C.Code.NextOffset;
@@ -268,12 +278,12 @@ private void gen_if(Ctxº C, R16º R, immutable Ir_.Ifº If) {
 	/* fix the branch destination */
 	C.Code.Payload.overwrite_at(
 		BranchOffset,
-		bytes(Op2.JeI4)~bytes(ElseOffset - BranchOffset - 6),
+		bytes_of(Op2.JeI4)~bytes_of(ElseOffset - BranchOffset - 6),
 	);
 	/* fix the jump destination */
 	C.Code.Payload.overwrite_at(
 		JumpOffset,
-		Op1.JmpI4~bytes(EndOffset - JumpOffset - 5),
+		Op1.JmpI4~bytes_of(EndOffset - JumpOffset - 5),
 	);
 };
 
@@ -294,14 +304,7 @@ private void gen_invocation(Ctxº C, R16º R, immutable Ir_.Invocationº V) {
 	C.IsTailPosition = false;
 
 	/* set the stack up for a call */
-	version (assert) {
-		/* verify stack alignment */
-		C.put_(op_mov_r4r4(R4º.Ax, R4º.Sp)); /* EAX <- ESP */
-		gen_assert_ax_aligned(C);
-		/* verify return value alignment */
-		C.put_(op_mov_r4m4(R4º.Ax, R4º.Bp, 0x8)); /* EAX <- return value ptr */
-		gen_assert_ax_aligned(C);
-	};
+
 	C.put_(op_sub_r4i4(R4º.Sp, 16*ArgC)); /* ESP -= 16*argc */
 
 	/* stack layout:
@@ -335,7 +338,7 @@ private void gen_invocation(Ctxº C, R16º R, immutable Ir_.Invocationº V) {
 
 	foreach (Idx, Param; V.Params) {
 		gen_expr(C, R, Param); /* R <- param */
-		C.put_(op_mova_m16r16(R4º.Sp, 16*Idx, R)); /* [ESP + 16*Idx] <- R */
+		C.put_(op_mova_m16r16(R4º.Sp, 16 + 16*Idx, R)); /* [ESP + …] <- R */
 	};
 
 	/* stack layout:
@@ -350,6 +353,15 @@ private void gen_invocation(Ctxº C, R16º R, immutable Ir_.Invocationº V) {
 		ESP+20: [¯¯¯¯¯¯]
 		ESP+……: [ arg2…
 	*/
+
+	version (assert) {
+		/* verify stack alignment */
+		C.put_(op_mov_r4r4(R4º.Ax, R4º.Sp)); /* EAX <- ESP */
+		gen_assert_ax_aligned(C);
+		/* verify return value alignment */
+		C.put_(op_mov_r4m4(R4º.Ax, R4º.Bp, 0x8)); /* EAX <- return value ptr */
+		gen_assert_ax_aligned(C);
+	};
 
 	if (DoTailJump) {/* do a tail-jump */
 
@@ -392,7 +404,7 @@ private void gen_invocation(Ctxº C, R16º R, immutable Ir_.Invocationº V) {
 
 		C.put_(op_mov_r4m4(R4º.Ax, R4º.Sp, 0)); /* EAX <- invokee.func */
 
-		C.put_(Op1.PushI4~bytes(ArgC)); /* PUSH ArgC */
+		C.put_(Op1.PushI4~bytes_of(ArgC)); /* PUSH ArgC */
 		C.put_(op_mov_r4m4(R4º.Cx, R4º.Bp, 0x8)); /* ECX <- return value ptr */
 		C.put_(ubyte(Op1.PushR4 + R4º.Cx)); /* PUSH ECX */
 
@@ -471,20 +483,20 @@ private void gen_func(Ctxº C, R16º R, immutable Ir_.Funcº Func) {
 		/* ECX <- &runtime.valigned_malloc */
 		C.put_(op_mov_r4m4(R4º.Cx, R4º.Ax, Rtº_.ValignedMalloc.offsetof));
 
+		/* PUSH R */
+		C.put_(op_sub_r4i4(R4º.Sp, 16));
+		C.put_(op_mova_m16r16(R4º.Sp, 0, R));
+
 		/* allocate upvalues array */
-		C.put_(Op1.PushI4~bytes(UpSyms.length)); /* PUSH # of upvals */
+		C.put_(Op1.PushI4~bytes_of(UpSyms.length)); /* PUSH # of upvals */
 		C.put_(ubyte(Op1.PushR4 + R4º.Ax)); /* PUSH &runtime */
 		C.put_(op_call_r4(R4º.Cx)); /* EAX <- valigned_malloc(…) */
-		C.put_(op_insr_r16r4(R, R4º.Ax, C_.Closureº.Upvals.offsetof/4));
-		C.put_(ubyte(Op1.PopR4 + R4º.Ax)); /* POP EAX */
-		C.put_(ubyte(Op1.PopR4 + R4º.Ax)); /* POP EAX */
+		C.put_(ubyte(Op1.PopR4 + R4º.Cx)); /* POP ECX */
+		C.put_(ubyte(Op1.PopR4 + R4º.Cx)); /* POP ECX */
 
-		// TODO: find an available scratch register
+		/* [ESP].Upvals = EAX */
+		C.put_(op_mov_m4r4(R4º.Sp, C_.Closureº.Upvals.offsetof, R4º.Ax));
 
-		{/* PUSH R */
-			C.put_(op_sub_r4i4(R4º.Sp, 16));
-			C.put_(op_mova_m16r16(R4º.Sp, 0, R));
-		};
 		/* evaluate upsyms, fill upvalues array */
 		foreach (Idx, Sym; UpSyms) {
 			R16º Scratch = R;
@@ -493,15 +505,11 @@ private void gen_func(Ctxº C, R16º R, immutable Ir_.Funcº Func) {
 			C.put_(op_mov_r4m4(R4º.Ax, R4º.Sp, C_.Closureº.Upvals.offsetof));
 			C.put_(op_mova_m16r16(R4º.Ax, Idx*16, Scratch));
 		};
-		{/* POP R */
-			C.put_(op_mova_r16m16(R, R4º.Sp, 0));
-			C.put_(op_add_r4i4(R4º.Sp, 16));
-		};
-	};
-};
 
-struct FuncInfoº {
-	string Name;
+		/* POP R */
+		C.put_(op_mova_r16m16(R, R4º.Sp, 0));
+		C.put_(op_add_r4i4(R4º.Sp, 16));
+	};
 };
 
 private FuncCodeº gen_func_body(immutable Ir_.Funcº Func) {
@@ -511,11 +519,11 @@ private FuncCodeº gen_func_body(immutable Ir_.Funcº Func) {
 	};
 
 	{/* prepend funcinfo */
-		FuncInfoº Info = {
+		C_.FuncInfoº Info = {
 			Name : Func.SelfSym.to_source.to_!string
 		};
 		auto Buf = new BufChainº;
-		Buf.put_(bytes(Info));
+		Buf.put_(bytes_of(Info));
 		C.Code.prepend(Buf.assume_unique());
 	};
 
@@ -576,21 +584,21 @@ private FuncCodeº gen_func_body(immutable Ir_.Funcº Func) {
 
 	{/* verify argc */
 		C.put_(op_mov_r4m4(R4º.Ax, R4º.Bp, 0xc)); /* EAX <- argc */
-		C.put_(Op1.CmpAxI4~bytes(C.MinimumArgC)); /* CMP argc, arity */
+		C.put_(Op1.CmpAxI4~bytes_of(C.MinimumArgC)); /* CMP argc, arity */
 
 		if (!Func.IsVariadic && Func.StrictArity) {/* fixed arity */
-			C.put_(Op1.JneI1.bytes~ubyte(2)); /* if argc != arity */
+			C.put_(Op1.JneI1.bytes_of~ubyte(2)); /* if argc != arity */
 		} else {/* variadic */
-			C.put_(Op1.JlI1.bytes~ubyte(2)); /* if argc < arity */
+			C.put_(Op1.JlI1.bytes_of~ubyte(2)); /* if argc < arity */
 		};
-		C.put_(Op1.JmpI1.bytes~ubyte(1));
+		C.put_(Op1.JmpI1.bytes_of~ubyte(1));
 		C.put_(Op1.Break); /* invalid argc */
 	};
 
 	/* … EAX still holding argc … */
 
 	if (Func.IsVariadic) {
-		/* construct a C_.Arrayº pointing to varargs on stack */
+		/* construct a C_.Csliceº pointing to varargs on stack */
 
 		C.put_(op_xor_r16r16(R16º.X0, R16º.X0)); /* XMM0 <- 0 */
 		C.put_(gen_load_self_m4!q{Runtime}(R4º.Cx)); /* ECX <- &runtime */
@@ -598,16 +606,16 @@ private FuncCodeº gen_func_body(immutable Ir_.Funcº Func) {
 		/* EDX <- runtime.VokeArray */
 		C.put_(op_mov_r4m4(R4º.Dx, R4º.Cx, Rtº_.VokeArray.offsetof));
 		/* XMM0.Func <- runtime.VokeArray */
-		C.put_(op_insr_r16r4(R16º.X0, R4º.Dx, C_.Arrayº.Func.offsetof/4));
+		C.put_(op_insr_r16r4(R16º.X0, R4º.Dx, C_.Csliceº.Func.offsetof/4));
 
 		/* XMM0.Len <- ArgC - PosNames.len - 1 */
 		C.put_(op_sub_r4i4(R4º.Ax, Func.PosNames.length + 1));
-		C.put_(op_insr_r16r4(R16º.X0, R4º.Ax, C_.Arrayº.Len.offsetof/4));
+		C.put_(op_insr_r16r4(R16º.X0, R4º.Ax, C_.Csliceº.Len.offsetof/4));
 
 		/* XMM0.Ptr <- EBP + 0x20 + 16*PosNames.len */
 		C.put_(op_mov_r4r4(R4º.Ax, R4º.Bp));
 		C.put_(op_add_r4i4(R4º.Ax, 0x20 + 16*Func.PosNames.length));
-		C.put_(op_insr_r16r4(R16º.X0, R4º.Ax, C_.Arrayº.Ptr.offsetof/4));
+		C.put_(op_insr_r16r4(R16º.X0, R4º.Ax, C_.Csliceº.Ptr.offsetof/4));
 
 		/* PUSH XMM0 */
 		C.put_(op_sub_r4i4(R4º.Sp, 16));
@@ -657,9 +665,9 @@ private FuncCodeº gen_func_body(immutable Ir_.Funcº Func) {
 
 private void gen_assert_ax_aligned(Ctxº C) {
 	/* if (EAX & 0x0000000f) {int3} */
-	C.put_(Op1.TestAxI4~bytes(0xf));
-	C.put_(Op1.JneI1.bytes~ubyte(2));
-	C.put_(Op1.JmpI1.bytes~ubyte(1));
+	C.put_(Op1.TestAxI4~bytes_of(~ValignMask));
+	C.put_(Op1.JneI1.bytes_of~ubyte(2));
+	C.put_(Op1.JmpI1.bytes_of~ubyte(1));
 	C.put_(Op1.Break); /* stack misaligned */
 };
 
@@ -669,7 +677,7 @@ private auto gen_load_param(R16º R, size_t Idx) {
 };
 
 private auto gen_load_self_m4(string FieldName)(R4º R) if (
-	staticIndexOf_!(FieldName, FieldNameTuple_!(C_.Closureº))
+	staticIndexOf_!(FieldName, FieldNameTuple_!(C_.Closureº)) != -1
 ) {
 	/* R <- self.FieldName */
 	enum Offset = mixin(`C_.Closureº.`~FieldName~`.offsetof`);
@@ -698,6 +706,8 @@ private void gen_opaque_lit(Tº)(Tº C, R16º R, uint[4] V) if (
 		};
 	};
 };
+
+version (none) // https://issues.dlang.org/show_bug.cgi?id=13331
 unittest {
 	auto C = new BufChainº;
 	gen_opaque_lit(C, R16º.X1, [
@@ -776,7 +786,7 @@ class FuncCodeº : Codeº {
 		Payload.Buffers.insertBack(X.Buffers[]);
 		X.Buffers.clear();
 
-		assert(Payload.RawSize == OldSz + XSz);
+		version (assert) assert(Payload.RawSize == OldSz + XSz);
 	};
 
 	ptrdiff_t prepend(immutable Codeº X) {
@@ -900,41 +910,40 @@ unittest {
 		return Buf.assume_unique();
 	})());
 
-	C.Payload.overwrite_at(0, bytes(Offset)[]);
+	C.Payload.overwrite_at(0, bytes_of(Offset)[]);
 
 	auto Ci = C.assume_unique();
 	assert(Ci.Read
 		.drop_(Ci.ValignedTrailSize)
 		.takeExactly_(Offset.sizeof)
-		.equal_(bytes(Offset)[])
+		.equal_(bytes_of(Offset)[])
 	);
 };
 
 /* --- --- */
 
-enum Valignment = Valº_.sizeof;
-static if (Valignment == 16) {
-	alias is_valigned = X => !(X & 0xf);
-	alias valign_up = X => (X & 0xfffffff0) + (X & 0xf ? 16 : 0);
-	alias valign_down = X => X & 0xfffffff0;
-} else {
-	alias is_valigned = X => X % Valignment == 0;
-	alias valign_up = X => X + (Valignment - (X % Valignment));
-	alias valign_down = X => X - X % Valignment;
-};
+enum Valignment = 16;
+static assert(Valº_.sizeof == Valignment);
+enum ValignMask = 0xfffffff0u;
+alias is_valigned = X => !(X & 0xfu);
+alias valign_up = X => (X & 0xfffffff0) + (X & 0xf ? 16 : 0);
+alias valign_down = X => X & 0xfffffff0;
 unittest {
-	assert(valign_up(0) == 0);
-	assert(valign_up(1) == 16);
-	assert(valign_up(2) == 16);
-	assert(valign_up(15) == 16);
-	assert(valign_up(16) == 16);
-	assert(valign_up(17) == 32);
-	assert(valign_up(31) == 32);
-	assert(valign_up(32) == 32);
+	static assert(valign_up(0) == 0);
+	static assert(valign_up(1) == 16);
+	static assert(valign_up(2) == 16);
+	static assert(valign_up(15) == 16);
+	static assert(valign_up(16) == 16);
+	static assert(valign_up(17) == 32);
+	static assert(valign_up(31) == 32);
+	static assert(valign_up(32) == 32);
 };
 
+/* registers */
 enum R4º : ubyte {Ax, Cx, Dx, Bx, Sp, Bp, Si, Di};
 enum R16º : ubyte {X0, X1, X2, X3, X4, X5, X6, X7};
+
+/* opcodes */
 
 enum Op1 : ubyte {
 	Break = 0xcc,
@@ -1003,7 +1012,7 @@ unittest {
 
 auto op_test_r16r16(R16º A, R16º B) {
 	/* PTEST A, B */
-	ubyte[5] C = bytes(Op4.Ptest)~to_!ubyte(0b11000000 + A*8 + B);
+	ubyte[5] C = bytes_of(Op4.Ptest)~to_!ubyte(0b11000000 + A*8 + B);
 	return C;
 };
 unittest {
@@ -1020,8 +1029,8 @@ auto op_add_r4i4(R4º Dst, int Val) {
 auto op_sub_r4i4(R4º Dst, int Val) {
 	/* SUB Dst, Val */
 	ubyte[6] C;
-	C[0 .. 2] = bytes(to_!ushort(Op2.SubRm4I4|(Dst<<8)|(0b11<<14)));
-	C[2 .. 6] = bytes(Val);
+	C[0 .. 2] = bytes_of(to_!ushort(Op2.SubRm4I4|(Dst<<8)|(0b11<<14)));
+	C[2 .. 6] = bytes_of(Val);
 	return C;
 };
 unittest {
@@ -1034,13 +1043,13 @@ unittest {
 auto op_mova_r16m16(R16º Dst, R4º SrcPtr, int Displ) {
 	/* MOVDQA Dst, [SrcPtr + Displ] */
 	ubyte[9] C = Op1.Nop; /* padding */
-	C[0 .. 3] = bytes(Op3.MovaR16Rm16)[0 .. 3];
+	C[0 .. 3] = bytes_of(Op3.MovaR16Rm16)[0 .. 3];
 	C[3] = to_!ubyte(0b10000000 + Dst*8 + SrcPtr);
 	if (SrcPtr == R4º.Sp) {
 		C[4] = to_!ubyte(R4º.Sp*8 + R4º.Sp); /* SIB byte */
-		C[5 .. 9] = bytes(Displ);
+		C[5 .. 9] = bytes_of(Displ);
 	} else {
-		C[4 .. 8] = bytes(Displ);
+		C[4 .. 8] = bytes_of(Displ);
 	};
 	return C;
 };
@@ -1056,13 +1065,13 @@ unittest {
 auto op_mova_m16r16(R4º DstPtr, int Displ, R16º Src) {
 	/* MOVDQA [DstPtr + Displ], Src */
 	ubyte[9] C = Op1.Nop; /* padding */
-	C[0 .. 3] = bytes(Op3.MovaRm16R16)[0 ..3];
+	C[0 .. 3] = bytes_of(Op3.MovaRm16R16)[0 ..3];
 	C[3] = to_!ubyte(0b10000000 + Src*8 + DstPtr);
 	if (DstPtr == R4º.Sp) {
 		C[4] = to_!ubyte(R4º.Sp*8 + R4º.Sp); /* SIB byte */
-		C[5 .. 9] = bytes(Displ);
+		C[5 .. 9] = bytes_of(Displ);
 	} else {
-		C[4 .. 8] = bytes(Displ);
+		C[4 .. 8] = bytes_of(Displ);
 	};
 	return C;
 };
@@ -1079,7 +1088,7 @@ unittest {
 
 ubyte[2] op_call_r4(R4º Dst) {
 	/* CALL Dst */
-	return bytes(to_!ushort(Op2.CallRm4|(Dst<<8)|(0b11<<14)));
+	return bytes_of(to_!ushort(Op2.CallRm4|(Dst<<8)|(0b11<<14)));
 };
 unittest {
 	assert(op_call_r4(R4º.Ax) == x"ffd0");
@@ -1089,7 +1098,7 @@ unittest {
 ubyte[4] op_xor_r16r16(R16º Dst, R16º Src) {
 	/* PXOR Dst, Src */
 	uint Param = 0b11000000 + Dst*8 + Src;
-	return bytes(Op3.XorR16R16|(Param<<24));
+	return bytes_of(Op3.XorR16R16|(Param<<24));
 };
 unittest {
 	assert(op_xor_r16r16(R16º.X0, R16º.X0) == x"660fef c0");
@@ -1102,7 +1111,7 @@ auto op_mov_r4i4(R4º Dst, uint Val) {
 	/* MOV Dst, Val */
 	ubyte[5] C;
 	C[0] = to_!ubyte(Op1.MovR4I4 + Dst);
-	C[1 .. 5] = bytes(Val);
+	C[1 .. 5] = bytes_of(Val);
 	return C;
 };
 unittest {
@@ -1130,9 +1139,9 @@ auto op_mov_r4m4(R4º Dst, R4º SrcPtr, int Displ) {
 	C[1] = to_!ubyte(0b10000000 + Dst*8 + SrcPtr);
 	if (SrcPtr == R4º.Sp) {
 		C[2] = to_!ubyte(R4º.Sp*8 + R4º.Sp); /* SIB byte */
-		C[3 .. 7] = bytes(Displ);
+		C[3 .. 7] = bytes_of(Displ);
 	} else {
-		C[2 .. 6] = bytes(Displ);
+		C[2 .. 6] = bytes_of(Displ);
 	};
 	return C;
 };
@@ -1148,9 +1157,9 @@ auto op_mov_m4r4(R4º DstPtr, int Displ, R4º Src) {
 	C[1] = to_!ubyte(0b10000000 + Src*8 + DstPtr);
 	if (DstPtr == R4º.Sp) {
 		C[2] = to_!ubyte(R4º.Sp*8 + R4º.Sp); /* SIB byte */
-		C[3 .. 7] = bytes(Displ);
+		C[3 .. 7] = bytes_of(Displ);
 	} else {
-		C[2 .. 6] = bytes(Displ);
+		C[2 .. 6] = bytes_of(Displ);
 	};
 	return C;
 };
@@ -1165,7 +1174,7 @@ auto op_insr_r16r4(R16º Dst, R4º Src, ubyte Idx) in {
 } body {
 	/* PINSRD XMM*, E*X, Idx */
 	ubyte[6] C;
-	C[0 .. 4] = bytes(Op4.PinsrD);
+	C[0 .. 4] = bytes_of(Op4.PinsrD);
 	C[4] = to_!ubyte(0b11000000 + Dst*8 + Src);
 	C[5] = Idx;
 	return C;
@@ -1179,10 +1188,6 @@ unittest {
 };
 
 /* --- miscellaneous --- */
-
-private auto bytes(Tº)(Tº X) {
-	return *(cast(ubyte[Tº.sizeof]*) &X);
-};
 
 /* -------------------------------------------------------------------------- */
 

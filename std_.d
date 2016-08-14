@@ -3,29 +3,29 @@
 private struct PkgsØ {
 
 	/* --- runtime --- */
-	
+
 	import core_atomic = core.atomic;
-	
-	//import core_attribute = core.attribute;
-	
+
+	import core_attribute = core.attribute;
+
 	import core_bitop = core.bitop;
-	
+
 	import core_checkedint = core.checkedint;
-	
+
 	import core_cpuid = core.cpuid;
-	
-	version (none) import core_demangle = core.demangle;
-	
+
+	import core_demangle = core.demangle;
+
 	import core_exception = core.exception;
-	
+
 	import core_math = core.math;
-	
+
 	import core_memory = core.memory;
-	
+
 	import core_runtime = core.runtime;
-	
-	version (none) import core_simd = core.simd;
-	
+
+	import core_simd = core.simd;
+
 	import core_sync_barrier = core.sync.barrier;
 	import core_sync_condition = core.sync.condition;
 	import core_sync_config = core.sync.config;
@@ -33,11 +33,11 @@ private struct PkgsØ {
 	import core_sync_mutex = core.sync.mutex;
 	import core_sync_rwmutex = core.sync.rwmutex;
 	import core_sync_semaphore = core.sync.semaphore;
-	
+
 	version (none) import core_thread = core.thread;
-	
+
 	version (none) import core_time = core.time;
-	
+
 	import core_vararg = core.vararg;
 
 	/* --- phobos --- */
@@ -63,7 +63,7 @@ private struct PkgsØ {
 
 	import std_complex = std.complex;
 
-	version (none) import std_concurrency = std.concurrency;
+	import std_concurrency = std.concurrency;
 
 	import std_container_array = std.container.array;
 	import std_container_binaryheap = std.container.binaryheap;
@@ -78,11 +78,11 @@ private struct PkgsØ {
 
 	import std_datetime = std.datetime;
 
-	version (none) import std_demangle = std.demangle;
+	import std_demangle = std.demangle;
 
 	import std_digest_crc = std.digest.crc;
 	import std_digest_digest = std.digest.digest;
-	//import std_digest_hmac = std.digest.hmac;
+	import std_digest_hmac = std.digest.hmac;
 	import std_digest_md = std.digest.md;
 	import std_digest_ripemd = std.digest.ripemd;
 	import std_digest_sha = std.digest.sha;
@@ -91,9 +91,33 @@ private struct PkgsØ {
 
 	import std_exception = std.exception;
 
-	// import std.experimental.
+	import std_experimental_allocator = std.experimental.allocator;
+	import std_experimental_allocator_common = std.experimental.allocator.common;
+	import std_experimental_allocator_gc_allocator = std.experimental.allocator.gc_allocator;
+	import std_experimental_allocator_mallocator = std.experimental.allocator.mallocator;
+	import std_experimental_allocator_mmap_allocator = std.experimental.allocator.mmap_allocator;
+	import std_experimental_allocator_showcase = std.experimental.allocator.showcase;
+	import std_experimental_allocator_typed = std.experimental.allocator.typed;
+	import std_experimental_allocator_building_blocks = std.experimental.allocator.building_blocks;
+	import std_experimental_allocator_building_blocks_affix_allocator = std.experimental.allocator.building_blocks.affix_allocator;
+	import std_experimental_allocator_building_blocks_allocator_list = std.experimental.allocator.building_blocks.allocator_list;
+	import std_experimental_allocator_building_blocks_bitmapped_block = std.experimental.allocator.building_blocks.bitmapped_block;
+	import std_experimental_allocator_building_blocks_bucketizer = std.experimental.allocator.building_blocks.bucketizer;
+	import std_experimental_allocator_building_blocks_fallback_allocator = std.experimental.allocator.building_blocks.fallback_allocator;
+	import std_experimental_allocator_building_blocks_free_list = std.experimental.allocator.building_blocks.free_list;
+	import std_experimental_allocator_building_blocks_free_tree = std.experimental.allocator.building_blocks.free_tree;
+	import std_experimental_allocator_building_blocks_kernighan_ritchie = std.experimental.allocator.building_blocks.kernighan_ritchie;
+	import std_experimental_allocator_building_blocks_null_allocator = std.experimental.allocator.building_blocks.null_allocator;
+	import std_experimental_allocator_building_blocks_quantizer = std.experimental.allocator.building_blocks.quantizer;
+	import std_experimental_allocator_building_blocks_region = std.experimental.allocator.building_blocks.region;
+	import std_experimental_allocator_building_blocks_scoped_allocator = std.experimental.allocator.building_blocks.scoped_allocator;
+	import std_experimental_allocator_building_blocks_segregator = std.experimental.allocator.building_blocks.segregator;
+	import std_experimental_allocator_building_blocks_stats_collector = std.experimental.allocator.building_blocks.stats_collector;
 
-	version (none) import std_file = std.file;
+	import std_experimental_logger = std.experimental.logger;
+	import std_experimental_logger_core = std.experimental.logger.core;
+
+	import std_file = std.file;
 
 	version (none) import std_format = std.format;
 
@@ -109,20 +133,20 @@ private struct PkgsØ {
 
 	import std_meta = std.meta;
 
-	version (none) import std_mmfile = std.mmfile;
+	import std_mmfile = std.mmfile;
 
 	//import std_net_curl = std.net.curl;
 	//import std_net_isemail = std.net.isemail;
 
 	import std_numeric = std.numeric;
 
-	version (none) import std_outbuffer = std.outbuffer;
+	import std_outbuffer = std.outbuffer;
 
-	version (none) import std_parallelism = std.parallelism;
+	import std_parallelism = std.parallelism;
 
-	version (none) import std_path = std.path;
+	import std_path = std.path;
 
-	version (none) import std_process = std.process;
+	import std_process = std.process;
 
 	version (none) import std_random = std.random;
 
@@ -132,7 +156,7 @@ private struct PkgsØ {
 
 	import std_regex = std.regex;
 
-	version (none) import std_signals = std.signals;
+	import std_signals = std.signals;
 
 	version (none) import std_socket = std.socket;
 
@@ -142,7 +166,7 @@ private struct PkgsØ {
 
 	import std_string = std.string;
 
-	version (none) import std_system = std.system;
+	import std_system = std.system;
 
 	import std_traits = std.traits;
 
@@ -162,7 +186,7 @@ private struct PkgsØ {
 
 	//import std_zip = std.zip;
 
-	version (none) import std_zlib = std.zlib;
+	import std_zlib = std.zlib;
 };
 
 private enum translateØ = (string Name) => Name~`_`;

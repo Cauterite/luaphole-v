@@ -3,8 +3,113 @@
 import std_;
 
 import Lang_ = language : S_ = SyntaxTbl;
+import C_ = coretypes : Valº_ = Valº;
 
 /* -------------------------------------------------------------------------- */
+
+/* --- parse source range into AST forms --- */
+
+Valº_[] source_to_forms(Tº)(Tº Src) if (
+	isInputRange_!Tº && is(ElementType_!Tº : dchar)
+) {
+	/* ? */
+
+	struct FormGenerator {
+		/* used by the parser to produce forms from source */
+
+		Valº_ num(byte Sign, in dchar[] I, in dchar[] F, uint Radix) {
+			return C_.Decimalº.from_lit(
+				Sign, I, F, Radix
+			);
+		};
+
+		Valº_ text(const(dchar)[] S) {
+			return C_.Utf8º(S.to_!string);
+		};
+
+		Valº_ name(const(dchar)[] S) {
+			return name(S, Nullable_!(C_.Symbolº).init);
+		};
+		Valº_ name(const(dchar)[] S, C_.Symbolº P) {
+			return name(S, Nullable_!(C_.Symbolº)(P));
+		};
+		Valº_ name(const(dchar)[] S, Nullable_!(C_.Symbolº) Parent) in {
+			assert(S != []);
+		} body {
+			bool IsAtom;
+			/* if name starts with `:`, it's definitely an atom */
+			if (S[0] == Lang_.SyntaxTbl.AtomDel) {
+				IsAtom = true;
+				S = S[1 .. $];
+			};
+
+			auto R = S.findSplit_([Lang_.SyntaxTbl.AtomDel]);
+			if (R[1] != []) {/* contains another `:` */
+
+				/* atom like `:foo:bar` */
+				if (IsAtom) {goto RetAtom;};
+
+				/* qualified symbol `parent:name` */
+				return name(R[2].array_, cast(C_.Symbolº) name(R[0].array_));
+			};
+
+			/* atom like `:foo` */
+			if (IsAtom) {goto RetAtom;};
+
+			/* unqualified symbol `name` */
+			return C_.Symbolº(to_!string(S), Parent);
+
+			RetAtom:;
+			enforce_(S.length <= C_.Atomº.Len.max,
+				`atom name too long (over `~
+				to_!string(C_.Atomº.Len.max)~` characters)`
+			);
+			return C_.Atomº(to_!string(S));
+		};
+
+		Valº_ list(Valº_[] Elems) {
+			return C_.Csliceº.from(Elems);
+		};
+
+		Valº_ call(Valº_ Callee, Valº_ ParamExpr) {
+			enforce_(C_.is_cslice(ParamExpr), `malformed expression`);
+			return C_.Invocationº(Callee, (cast(C_.Csliceº) ParamExpr).Elems);
+		};
+
+		Valº_ subscript(Valº_ ObjExpr, Valº_ FieldExpr) {
+			if (C_.is_symbol(FieldExpr)) {
+				FieldExpr = C_.Atomº((cast(C_.Symbolº) FieldExpr).Name);
+			};
+			return call(ObjExpr, list([FieldExpr]));
+		};
+
+		Valº_ methcall(Valº_ ObjExpr, Valº_ FieldExpr, Valº_ ParamExpr) {
+			return call(subscript(ObjExpr, FieldExpr), ParamExpr);
+		};
+	};
+
+	struct SourceRangeº(Rº) {
+		Rº Src;
+		size_t Line = 1;
+		bool empty() {return Src.empty;};
+		auto front() {return Src.front;};
+		void popFront() {
+			if (is_linebreak(front)) {Line += 1;};
+			Src.popFront();
+		};
+	};
+
+	auto Srng = SourceRangeº!(typeof(Src.stride_(1)))(Src.stride_(1));
+
+	return parse(&Srng, FormGenerator()).ifThrown_!Exception((X) {
+		throw new Exception(
+			`syntax error at line `~Srng.Line.to_!string~`: `~X.msg
+		);
+		return [Valº_.init];
+	});
+};
+
+/* --- low-level lexical parser --- */
 
 bool is_linebreak(dchar Chr) {return Lang_.Linebreaks.canFind_(Chr);};
 bool is_white(dchar Chr) {return Lang_.Whitespaces.canFind_(Chr);};
@@ -110,6 +215,15 @@ auto parse(Srcº, Genº)(Srcº Src, Genº ValGen) if (
 	};
 
 	Valº interp_number(dchar[] Chrs) {
+		/* ipart */
+		/* ipart, */
+		/* ipart,fpart */
+		/* radix/ipart */
+		/* radix/,fpart */
+		/* radix/ipart, */
+		/* radix/ipart,fpart */
+		/* 0/ipart,fpart -> 16/ipart,fpart */
+
 		dchar[] NotSpaces;
 		foreach (Chr; Chrs.idup) {
 			if (Chr != S_.NumSpace) {NotSpaces ~= Chr;};
@@ -117,7 +231,7 @@ auto parse(Srcº, Genº)(Srcº Src, Genº ValGen) if (
 		Chrs = NotSpaces;
 		enforce_(Chrs != [], `malformed numeric literal`);
 
-		int Sign = 1;
+		byte Sign = 1;
 		if (Chrs[$ - 1] == S_.NumPlus) {
 			Chrs.length -= 1;
 		} else if (Chrs[$ - 1] == S_.NumMinus) {

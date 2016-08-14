@@ -1,24 +1,14 @@
 ﻿/* -------------------------------------------------------------------------- */
 
 import Std_;
+import Hash_ = core.internal.hash;
 
 import C_ = coretypes : Valº_ = Valº;
 import Lang_ = language;
 
 /* -------------------------------------------------------------------------- */
 
-// TODO: all the to_source() impl.s are crappy temporary code
-
-unittest {
-	/+import Parser_ = parser;
-	import Rt_ = runtime;
-	Valº_[] Forms = Parser_.parse(
-		`.if_(:t .env 6,2)`.stride_(1),
-		C_.FormGenerator()
-	);
-	auto Ir = form_to_ir(Rt_.root_namespace(), Forms[0]);
-	//writeln_(Ir.to_source);+/
-};
+// TODO: all the to_source() implementations are crappy temporary code
 
 /* --- intermediate representations of expressions --- */
 
@@ -79,10 +69,12 @@ class Utf8º : Irº {
 };
 
 class Numberº : Irº {
-	double N;
-	this(double X) immutable {N = X;};
+	immutable(C_.DynDecº)* Num;
+	this(immutable(C_.DynDecº)* X) immutable {
+		Num = X;
+	};
 	override InputRange_!dchar to_source() immutable {
-		return inputRangeObject_(to_!string(N));
+		return inputRangeObject_(to_!string(Num));
 	};
 	mixin ToStringOverride;
 };
@@ -109,8 +101,7 @@ class Symbolº : Irº {
 	};
 
 	override size_t toHash() const @safe nothrow {
-		auto Ph = Parent.isNull ? 0 : Parent.toHash();
-		return (Ph + 1) ^ typeid(Name).getHash(&Name);
+		return Hash_.hashOf(Name, Parent.isNull ? 0 : Parent.toHash());
 	};
 
 	override bool opEquals(Object Obj) {
@@ -255,9 +246,9 @@ class Ifº : Irº {
 };
 
 class Funcº : Irº {
-	string Name;
-	string[] PosNames;
-	Nullable_!(string, ``) VaName;
+	string Name; /* 'internal' name (for self-recursion) */
+	string[] PosNames; /* positional formals */
+	Nullable_!(string, ``) VaName; /* variadic params array */
 	Irº[] Bodies;
 	bool StrictArity; /* allow excess parameters? */
 
@@ -397,31 +388,33 @@ class Letº : Irº {
 immutable(Irº) form_to_ir(C_.Namespaceº Ns, Valº_ Form) {
 	/* ? */
 
+	static auto get_env(C_.Namespaceº Ns) {
+		auto Q = Ns.query(C_.Symbolº(Lang_.CoreNameTbl.EnvNs));
+		assert(!Q.isNull && C_.is_namespace(Q.Val));
+		return cast(C_.Namespaceº) Q.Val;
+	};
+
 	static auto query_env_with_attrib(
 		C_.Namespaceº Ns, C_.Symbolº Sym, C_.Atomº AttrName
 	) {
 		/* aliases and macros can only be read from .env and above
 		because deeper namespaces don't exist at runtime */
-		auto Q = Ns.query(C_.symbol(Lang_.CoreNameTbl.EnvNs));
-		assert(!Q.isNull && C_.is_namespace(Q.Val));
-		auto Env = C_.Namespaceº(Q.Val);
-
-		Q = Env.query(Sym);
-		if (!Q.isNull && Q.AttribTbl.get(AttrName, Valº_.init)) {return Q;};
+		auto Q = get_env(Ns).query(Sym);
+		if (!Q.isNull && AttrName in Q.AttribTbl) {return Q;};
 		return Q.init;
 	};
 
 	if (C_.is_atom(Form)) {
-		return new immutable Atomº(C_.Atomº(Form).Str.assumeUnique_);
+		return new immutable Atomº((cast(C_.Atomº) Form).Txt.assumeUnique_);
 
-	} else if (C_.is_number(Form)) {
-		return new immutable Numberº(C_.Floatº(Form).N);
+	} else if (C_.is_decimal(Form)) {
+		return new immutable Numberº((cast(C_.Decimalº) Form).Num);
 
-	}else if (C_.is_utf8(Form)) {
-		return new immutable Utf8º(C_.Utf8º(Form).S);
+	} else if (C_.is_utf8(Form)) {
+		return new immutable Utf8º((cast(C_.Utf8º) Form).Txt);
 
 	} else if (C_.is_symbol(Form)) {
-		auto Sym = C_.Symbolº(Form);
+		auto Sym = cast(C_.Symbolº) Form;
 
 		/* keywords */
 		if (Sym.Name == Lang_.KeywordTbl.Nil) {
@@ -434,29 +427,43 @@ immutable(Irº) form_to_ir(C_.Namespaceº Ns, Valº_ Form) {
 		auto ResolvedSym = resolve_symbol(Ns, Sym);
 
 		/* search for matching aliases/macros */
-		{auto Q = query_env_with_attrib(Ns, ResolvedSym, C_.atom(`alias`));
+		{auto Q = query_env_with_attrib(Ns, ResolvedSym, C_.Atomº(`alias`));
 			if (!Q.isNull) {
 				return form_to_ir(Ns, Q.Val);
 			};
 		};
-		{auto Q = query_env_with_attrib(Ns, ResolvedSym, C_.atom(`macro`));
+		{auto Q = query_env_with_attrib(Ns, ResolvedSym, C_.Atomº(`macro`));
 			enforce_(Q.isNull, `can't take value of macro "`~Sym.Name~`"`);
+		};
+
+		/* lookup the name at runtime - .env.at(:foo) */
+		if (
+			ResolvedSym.HasParent &&
+			ResolvedSym.Parent == get_env(Ns).SelfSym
+		) {
+			return new immutable Invocationº(
+				new immutable Invocationº(
+					sym_form_to_ir(get_env(Ns).SelfSym),
+					[new immutable Atomº(`at`)]
+				),
+				[new immutable Atomº(ResolvedSym.Name)]
+			);
 		};
 
 		return sym_form_to_ir(ResolvedSym);
 
 	} else if (C_.is_invocation(Form)) {
-		auto V = C_.Invocationº(Form);
+		auto V = cast(C_.Invocationº) Form;
 
-		if (!C_.is_symbol(*V.Invokee)) {
+		if (!C_.is_symbol(V.Invokee)) {
 			return new immutable Invocationº(
-				form_to_ir(Ns, *V.Invokee),
+				form_to_ir(Ns, V.Invokee),
 				V.Params.map_!(X => form_to_ir(Ns, X))
 			);
 		};
 
 		/* keywords */
-		switch (C_.Symbolº(*V.Invokee).Name) {
+		switch ((cast(C_.Symbolº) V.Invokee).Name) {
 			case Lang_.KeywordTbl.Func : {
 				return func_form_to_ir(Ns, V.Params);
 			};
@@ -477,16 +484,16 @@ immutable(Irº) form_to_ir(C_.Namespaceº Ns, Valº_ Form) {
 			default : break;
 		};
 
-		auto Invokee = resolve_symbol(Ns, C_.Symbolº(*V.Invokee));
+		auto Invokee = resolve_symbol(Ns, cast(C_.Symbolº) V.Invokee);
 
 		/* search for matching aliases/macros */
-		{auto Q = query_env_with_attrib(Ns, Invokee, C_.atom(`alias`));
+		{auto Q = query_env_with_attrib(Ns, Invokee, C_.Atomº(`alias`));
 			/* alias expansion must occur here to allow aliases for keywords */
 			if (!Q.isNull) {
-				return form_to_ir(Ns, C_.invocation(Q.Val, V.Params));
+				return form_to_ir(Ns, C_.Invocationº(Q.Val, V.Params));
 			};
 		};
-		{auto Q = query_env_with_attrib(Ns, Invokee, C_.atom(`macro`));
+		{auto Q = query_env_with_attrib(Ns, Invokee, C_.Atomº(`macro`));
 			if (!Q.isNull) {
 				/* macro expansion */
 				Valº_[] Params = V.Params.map_!(
@@ -504,19 +511,19 @@ immutable(Irº) form_to_ir(C_.Namespaceº Ns, Valº_ Form) {
 		};
 
 		return new immutable Invocationº(
-			form_to_ir(Ns, *V.Invokee),
+			form_to_ir(Ns, V.Invokee),
 			V.Params.map_!(X => form_to_ir(Ns, X))
 		);
 	};
 
 	/* can't compile this form */
-	throw new Exception(``);
+	throw new Exception(`invalid form`);
 };
 
 immutable(Symbolº) sym_form_to_ir(C_.Symbolº Sym) {
 	return new immutable Symbolº(
 		Sym.Name,
-		Sym.Parent ? sym_form_to_ir(*Sym.Parent) : null
+		Sym.HasParent ? sym_form_to_ir(Sym.Parent) : null
 	);
 };
 
@@ -525,27 +532,31 @@ immutable(Funcº) func_form_to_ir(C_.Namespaceº Ns, Valº_[] Params) {
 	enforce_(Params.length >= 3);
 
 	enforce_(C_.is_symbol(Params[0]));
-	auto SelfSym = C_.Symbolº(Params[0]);
-	assert(!SelfSym.Parent);
-	auto NewNs = C_.namespace(SelfSym.Name, Ns);
+	auto SelfSym = cast(C_.Symbolº) Params[0];
+	assert(!SelfSym.HasParent);
+	auto NewNs = C_.namespace(
+		SelfSym.Name, C_.maybe(Ns), Yes_.IsolateSubSyms
+	);
 
 	/* split the formals into [param1 param2] and [varargs] */
-	enforce_(C_.is_array(Params[1]));
-	auto Split = C_.Arrayº(Params[1]).Elems[]
-		.map_!(X => (enforce_(C_.is_symbol(X)), C_.Symbolº(X)))
-		.findSplit_!(q{a.Name == b.Name})([C_.symbol(Lang_.KeywordTbl.Varargs)])
+	enforce_(C_.is_cslice(Params[1]));
+	auto Split = (cast(C_.Csliceº) Params[1]).Elems[]
+		.map_!(X => (enforce_(C_.is_symbol(X)), cast(C_.Symbolº) X))
+		.findSplit_!(q{a.Name == b.Name})(
+			[C_.Symbolº(Lang_.KeywordTbl.Varargs)]
+		)
 	;
 
 	auto PositionalNames = Split[0].map_!(X => X.Name[]);
 	foreach (Name; PositionalNames) {
-		NewNs.define(C_.atom(Name), null, Valº_.init);
+		NewNs.define(C_.Atomº(Name), null, Valº_.init);
 	};
 
 	string VaName;
 	if (Split) {
 		enforce_(Split[2].walkLength_ == 1);
 		VaName = Split[2].front.Name;
-		NewNs.define(C_.atom(VaName), null, Valº_.init);
+		NewNs.define(C_.Atomº(VaName), null, Valº_.init);
 	};
 
 	/* compile the body forms */
@@ -568,8 +579,8 @@ immutable(Letº) let_form_to_ir(C_.Namespaceº Ns, Valº_[] Params) {
 	for performance, not implemented in terms of .fn_ */
 	enforce_(Params.length >= 2);
 
-	enforce_(C_.is_array(Params[0]));
-	auto Bindings = C_.Arrayº(Params[0]).Elems;
+	enforce_(C_.is_cslice(Params[0]));
+	auto Bindings = (cast(C_.Csliceº) Params[0]).Elems;
 	enforce_(Bindings.length % 2 == 0);
 
 	auto NewNs = C_.namespace(`let;`~randomUUID_().toString, Ns);
@@ -577,9 +588,9 @@ immutable(Letº) let_form_to_ir(C_.Namespaceº Ns, Valº_[] Params) {
 	/* traverse the binding form and add the names to the new NS */
 	foreach (B; Bindings.chunks_(2)) {
 		enforce_(C_.is_symbol(B[0]));
-		auto Sym = C_.Symbolº(B[0]);
+		auto Sym = cast(C_.Symbolº) B[0];
 		RawNames ~= Sym;
-		NewNs.define(C_.atom(Sym.Name), null, Valº_.init);
+		NewNs.define(C_.Atomº(Sym.Name), null, Valº_.init);
 	};
 
 	/* compile the values */
@@ -602,13 +613,16 @@ immutable(Letº) let_form_to_ir(C_.Namespaceº Ns, Valº_[] Params) {
 	);
 };
 
-private C_.Symbolº resolve_symbol(C_.Namespaceº Ns, C_.Symbolº Sym) {
+private C_.Symbolº resolve_symbol(C_.Namespaceº Ns, C_.Symbolº Sym) out (X) {
+	/* the root namespace is the only symbol without a parent */
+	version (none) assert(X.HasParent);
+} body {
 	/* if it's a keyword, just return the name */
 	foreach (Kw; __traits(allMembers, Lang_.KeywordTbl)) {
-		if (Kw == Sym.Name) {return C_.symbol(Sym.Name);};
+		if (Kw == Sym.Name) {return C_.Symbolº(Sym.Name);};
 	};
 
-	if (Sym.Parent) {return Sym; /* already qualified */};
+	if (Sym.HasParent) {return Sym; /* already qualified */};
 
 	/* use Ns to resolve the unqualified name */
 	auto Q = Ns.query(Sym);
@@ -624,17 +638,17 @@ private Valº_ bind_form(Tº)(C_.Namespaceº Ns, Valº_ Form, Tº OldSyms) if (
 	that appears in the list OldSyms is re-resolved */
 
 	if (C_.is_symbol(Form)) {
-		auto Sym = C_.Symbolº(Form);
+		auto Sym = cast(C_.Symbolº) Form;
 		foreach (O; OldSyms) {
 			if (O != Sym) {continue;};
-			return resolve_symbol(Ns, C_.symbol(Sym.Name));
+			return resolve_symbol(Ns, C_.Symbolº(Sym.Name));
 		};
 		return Form;
 
 	} else if (C_.is_invocation(Form)) {
-		auto V = C_.Invocationº(Form);
-		return C_.invocation(
-			bind_form(Ns, *V.Invokee, OldSyms),
+		auto V = cast(C_.Invocationº) Form;
+		return C_.Invocationº(
+			bind_form(Ns, V.Invokee, OldSyms),
 			V.Params.map_!(X => bind_form(Ns, X, OldSyms)).array_
 		);
 
@@ -647,15 +661,15 @@ private Valº_ resolve_form_for_macro(C_.Namespaceº Ns, Valº_ Form) {
 	/* ? */
 
 	if (C_.is_symbol(Form)) {
-		auto Sym = C_.Symbolº(Form);
+		auto Sym = cast(C_.Symbolº) Form;
 		return resolve_symbol(Ns, Sym).ifThrown_(
-			C_.symbol(Sym.Name, Ns.SelfSym)
+			C_.Symbolº(Sym.Name, Ns.SelfSym)
 		);
 
 	} else if (C_.is_invocation(Form)) {
-		auto V = C_.Invocationº(Form);
-		return C_.invocation(
-			resolve_form_for_macro(Ns, *V.Invokee),
+		auto V = cast(C_.Invocationº) Form;
+		return C_.Invocationº(
+			resolve_form_for_macro(Ns, V.Invokee),
 			V.Params.map_!(X => resolve_form_for_macro(Ns, X)).array_
 		);
 
@@ -699,7 +713,7 @@ private string obj_to_string(Tº)(Tº Obj) if (is(Tº == class)) {
 			is(Unqual_!(typeof(X)) == Nullable_!(Xº), Xº) ||
 			is(Unqual_!(typeof(X)) == Nullable_!(Xº,Y), Xº, alias Y)
 		) {
-			S ~= `null`;
+			S ~= (X.isNull ? `null` : to_!string(cast() X.get));
 		} else {
 			S ~= to_!string(X);
 		};
