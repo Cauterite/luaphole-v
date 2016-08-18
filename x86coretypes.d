@@ -4,7 +4,7 @@ version (X86) {} else {static assert(0);};
 version (D_InlineAsm_X86) {} else {static assert(0);};
 
 import Std_;
-import Hash_ = core.internal.hash;
+import core.internal.hash : hash_of_ = hashOf;
 
 import Misc_ = miscellaneous : MpDec_ = MpDec;
 import Rt_ = runtime;
@@ -14,13 +14,12 @@ import X86_ = x86generator;
 /* -------------------------------------------------------------------------- */
 
 // TODO: find out why -inline breaks the code
-// WIP: convert constructor functions to actual constructors
-// TODO: find a way to make small Atrees more memory-efficient
 // TODO: make sure all value allocations are through valigned_malloc
 // TODO: unittests for Namespaceº
 // TODO: use something other than Arrayº for AST forms
 // TODO: to-source should not be a method, it should be a global function
 // TODO: optimise Atreeº iteration
+// TODO: HtreeRootº needs payload packed towards the start of the structure
 
 /*
 	value types
@@ -191,7 +190,7 @@ mixin template ValSubType(size_t PadLen = 0) {
 	alias BaseØ this;
 	@property auto ref BaseØ()() inout {return *(cast(inout Valº*) &this);};
 
-	static assert(is(typeof(this) : Valº));
+	//static assert(is(typeof(this) : Valº));
 	static assert(this.sizeof == Valº.sizeof);
 
 	invariant {
@@ -238,31 +237,51 @@ template dispatch_methods(Tº) if (IsVal!Tº) {
 		@(`foo`) Valº bar() {…};
 	and creates a dispatch function that maps Atomº(`foo`) to &bar
 	*/
-	enum dispatch_methods = cast(Funcº) &dispatch;
+	enum dispatch_methods = cast(Funcº) &disp;
 
-	static extern(C) Valº dispatch(size_t ArgC, Tº Self, Atomº Key) in {
-		assert(ArgC == 2);
+	static extern(C) Valº disp(size_t ArgC, Tº Self, Atomº Key) in {
+		assert(ArgC == 2,
+			`attempt to invoke `~Tº.stringof~` with `~(ArgC-1).to_!string~
+			` parameters (expected 1)`
+		);
 		assert(is_atom(Key));
 	} body {
-		debug(dispatch) writeln_(`meth.disp.: `, Tº.stringof, `.`, Key.Txt);
+		debug (dispatch) {
+			if (Key.Txt != `dump`) { 
+				writeln_(`meth.disp.: `, Tº.stringof, `.`, Key.Txt);
+			};
+		};
 
 		/* dispatch on Key */
-		return S.DispatchTbl.get(Key, &fallback)(ArgC, (* cast(Valº*) &Self));
-	};
-
-	/* if no methods match */
-	extern(C) Valº fallback(size_t, Valº, ...) {return Valº.init;};
-
-	/* dispatch table (constructed once at runtime) */
-	struct S {
-		static immutable Funcº[Atomº] DispatchTbl;
-		__gshared static this() {
-			foreach (Idx, DynName; DynamicNames) {
-				DispatchTbl[Atomº(DynName)] = cast(Funcº) &f!(Idx, DynName);
-			};
-			DispatchTbl.rehash;
+		if (auto Method = *(cast(CtfeAtomº*) &Key) in DispatchTbl) {
+			return (*Method)(ArgC, Self);
 		};
+
+		debug (dispatch) {
+			writeln_(`method does not exist: `, Tº.stringof, `.`, Key.Txt);
+		};
+		return Valº.init;
 	};
+
+	/* dispatch table constructed at compile time */
+	immutable DispatchTbl = ({
+		alias Forwarderº = extern(C) Valº function(size_t, Tº);
+		alias Tblº = Misc_.StaticHashTblº!(
+			CtfeAtomº, Forwarderº, //CtfeAtomº.init,
+			X => X.toHash, (X, Y) => X is Y
+		);
+
+		return Tblº.From!(({
+			Tblº.Pairº[] Pairs;
+			foreach (Idx; aliasSeqOf_!(iota_(DynamicNames.length))) {
+				Pairs ~= Tblº.Pairº(
+					CtfeAtomº(DynamicNames[Idx]),
+					&f!(Idx, DynamicNames[Idx])
+				);
+			};
+			return Pairs;
+		})());
+	})();
 
 	/* forwarder */
 	extern(C) static Valº f(size_t Idx, string DynName)(size_t ArgC, Tº Self) {
@@ -279,7 +298,9 @@ template dispatch_methods(Tº) if (IsVal!Tº) {
 			return __traits(getMember, Self, StaticName)();
 
 		} else {
-			static assert(`invalid signature for dynamic method '`~StaticName~`'`);
+			static assert(
+				`invalid signature for dynamic method '`~StaticName~`'`
+			);
 		};
 	};
 
@@ -328,6 +349,27 @@ template dispatch_methods(Tº) if (IsVal!Tº) {
 			enum IsVokeable = false;
 		};
 	};
+
+	/* dispatch table (constructed once at runtime) */
+	/+struct S {
+		static immutable Funcº[Atomº] DispatchTbl;
+		__gshared static this() {
+			foreach (Idx, DynName; DynamicNames) {
+				DispatchTbl[Atomº(DynName)] = cast(Funcº) &f!(Idx, DynName);
+			};
+			DispatchTbl.rehash;
+		};
+	};+/
+};
+
+debug string dump_val(Valº V) {
+	if (V is V.init) {return `.n`;};
+	auto R = V.voke!`dump`;
+	if (is_utf8(R)) {
+		return (cast(Utf8º) R).Txt;
+	};
+	import std.format;
+	return format(`;\?VAL(%08x)\;`, cast(size_t) V.Func);
 };
 
 /* --- closure --- */
@@ -344,10 +386,186 @@ struct FuncInfoº {
 	string Name;
 };
 
+/* -- atom type -- */
+
+struct Atomº {
+	Funcº Func = &atom_trampoline;
+	union {
+		char[size_t.sizeof * 2] ShortStr;
+		struct {
+			immutable(char)* LongStr;
+			size_t LongStrHash;
+		};
+		size_t[2] Payload;
+	};
+	size_t Len;
+
+	alias PtrCount = (typeof(this) X) => (X.IsShort ? 0 : 1);
+	mixin ValSubType;
+
+	invariant {
+		if (Len > ShortStr.length) {
+			assert(LongStrHash == hash_of_(LongStr[0 .. Len]));
+		};
+	};
+
+	this(string Src) out (A) {
+		assert(A.InternalTxt == Src);
+		if (!A.IsShort) {
+			assert(hash_of_(Src) == A.toHash);
+		};
+	} body {
+		Len = Src.length;
+		Payload = [0, 0];
+		if (Src.length <= ShortStr.length) {
+			ShortStr[0 .. Src.length] = Src;
+		} else {
+			LongStr = Src.ptr;
+			LongStrHash = hash_of_(Src);
+		};
+	};
+
+	size_t toHash() const @trusted pure nothrow {
+		return IsShort ? hash_of_short_atom(Payload) : LongStrHash;
+	};
+
+	@property char[] Txt() const {return InternalTxt.dup;};
+	private @property const(char)[] InternalTxt() const {
+		if (IsShort) {
+			return ShortStr[0 .. Len];
+		} else {
+			return LongStr[0 .. Len];
+		};
+	};
+
+	@property bool IsShort() const @safe pure nothrow {
+		/* note: this returns false when Len==0, but it doesn't matter */
+		return !((Len - 1) & ~0b111);
+		//return !(((Len - 8) >> 3) ^ 0x1FFFFFFF);
+	};
+	unittest {
+		immutable char[1000] Src;
+		foreach (size_t X; 0 .. Src.length) {
+			auto A = Atomº(Src[0 .. X]);
+			if (A.Len == 0) {continue;};
+			assert(A.IsShort == (A.Len <= ShortStr.length));
+		};
+	};
+
+	bool opEquals()(in auto ref typeof(this) A) const {
+		if (/* these fields must be identical */
+			Func !is A.Func ||
+			Payload[1] != A.Payload[1] ||
+			Len != A.Len
+		) {return false;};
+
+		if (Payload[0] == A.Payload[0]) {return true;};
+		if (IsShort) {return false;};
+		return LongStr[0 .. Len] == A.LongStr[0 .. Len];
+	};
+
+	version (none) @(`to-source`) auto to_utf8_source() {
+		return utf8(`:`~Txt.assumeUnique_);
+	};
+
+	@(`to-hash`) auto to_hash_integer() {
+		return Int64º(toHash);
+	};
+
+	@(`=`) static extern(C) Valº equals(size_t ArgC, Atomº Self, Atomº X) in {
+		assert(ArgC == 2);
+	} body {
+		return bool_val(Self == X);
+	};
+
+	debug @(`dump`) auto dump() {
+		return Utf8º((':'~InternalTxt).assumeUnique_);
+	};
+};
+
+bool is_atom(Valº V) @trusted pure nothrow @nogc {
+	return V.Func is Atomº.init.Func;
+};
+
+unittest {
+	assert(Atomº(``) == Atomº(``));
+	assert(Atomº(``).toHash == Atomº(``).toHash);
+	assert(Atomº(`x`) == Atomº(`x`));
+	assert(Atomº(`x`).toHash == Atomº(`x`).toHash);
+	assert(Atomº(`x`) != Atomº(`y`));
+	assert(Atomº(`x`).toHash != Atomº(`y`).toHash);
+	assert(Atomº(`asdfghja`).IsShort);
+	assert(!Atomº(`asdfghjaw`).IsShort);
+	assert(Atomº(`asdfghjawww`).toHash);
+	auto S = randomUUID_().toString;
+	assert(Atomº(S) == Atomº(S));
+	assert(Atomº(S).toHash == Atomº(S).toHash);
+	assert(Atomº(S) != Atomº(randomUUID_().toString));
+	assert(Atomº(S).toHash != Atomº(randomUUID_().toString).toHash);
+};
+
+private struct CtfeAtomº {
+	Funcº Func = &atom_trampoline;
+	size_t[2] Payload;
+	size_t Len;
+
+	alias Val this;
+	@property auto ref Val()() inout {return *(cast(inout Valº*) &this);};
+	static assert(this.sizeof == Valº.sizeof);
+
+	this(string Src) in {
+		assert(Src.length <= 2 * size_t.sizeof,
+			`cannot create a long atom at compile-time`
+		);
+	} body {
+		Len = Src.length;
+		ubyte[2 * size_t.sizeof] X;
+		X[0 .. Len] = cast(const ubyte[]) Src;
+		Payload[0] = X[0] | (X[1] << 8) | (X[2] << 16) | (X[3] << 24);
+		Payload[1] = X[4] | (X[5] << 8) | (X[6] << 16) | (X[7] << 24);
+	};
+
+	size_t toHash() const @safe pure nothrow {
+		return hash_of_short_atom(Payload);
+	};
+};
+
+private size_t hash_of_short_atom(size_t[2] Xs) @safe pure nothrow {
+	return hash_of_(Xs[1], hash_of_(Xs[0]));
+	/+static size_t mix(size_t X) @safe pure nothrow @nogc {
+		enum M = 0x5bd1e995;
+		X ^= X >> 13;
+		X *= M;
+		X ^= X >> 15;
+		return X;
+	};
+	return mix(rol_!7(Xs[0])) + mix(Xs[1]);+/
+};
+
+/* forwarder for the atom dispatcher.
+avoids cyclic dependency between `dispatch_methods` and `CtfeAtomº` */
+private extern(C) Valº atom_trampoline(size_t, Valº, ...) {
+	/* to be overwritten with a JMP */
+	asm {naked; int 3; di 0xffffffff;};
+};
+shared static this() {
+	/* patch the trampoline with the real jump target */
+	uint Target = cast(uint) dispatch_methods!Atomº;
+	Target -= (cast(uint) &atom_trampoline) + 5;
+
+	auto Code = (cast(ubyte*) &atom_trampoline)[0 .. 5];
+	//assert(Code == X86_.Op1.Break~x"ffffffff");
+
+	uint PrevAccess = Misc_.set_page_access(Code, Misc_.PageAllAccess);
+	Code[0] = X86_.Op1.JmpI4;
+	Code[1 .. 5] = Misc_.bytes_of(Target);
+	version (Windows) Misc_.set_page_access(Code, PrevAccess);
+};
+
 /* -- ns -- */
 
 struct Namespaceº {
-	private Funcº Func;
+	Funcº Func = dispatch_methods!(typeof(this));
 	private Implº O;
 	enum PtrCount = 0;
 	mixin ValSubType!2;
@@ -368,8 +586,11 @@ struct Namespaceº {
 		assert(&O.Sym);
 	};
 
-	this(string Name, Maybeº!Namespaceº Parent, Flag_!q{IsolateSubSyms} Iso) {
-		Func = cast(Funcº) &voke_namespace!();
+	this(
+		string Name,
+		Maybeº!(typeof(this)) Parent = Maybeº!(typeof(this)).init,
+		Flag_!q{IsolateSubSyms} Iso = No_.IsolateSubSyms
+	) {
 		O = new Implº;
 		O.IsolateSubSyms = Iso;
 		O.Parent = Parent;
@@ -396,7 +617,7 @@ struct Namespaceº {
 
 	auto query(Symbolº Sym) {
 		struct Rº {
-			Namespaceº Ns;
+			Valº Ns;
 			Symbolº Sym;
 			Valº[Atomº] AttribTbl;
 			Valº Val;
@@ -432,85 +653,55 @@ struct Namespaceº {
 			return O.Parent.query(Sym);
 		};
 
-		return Nullable_!Rº();
+		return Nullable_!Rº.init;
+	};
+
+	@(`root`) Valº get_root_ns() {
+		auto Ns = this;
+		while (Ns.HasParent) {Ns = Ns.O.Parent;};
+		return Ns;
+	};
+
+	@(`at`) static extern(C) Valº ns_get(
+		size_t ArgC, typeof(this) Self, Symbolº Sym, Valº Else
+	) in {
+		assert(ordered_(2, ArgC, 3));
+	} body {
+		if (is_atom(cast(Valº) Sym)) {
+			Sym = Symbolº((cast(Atomº) Sym).Txt.assumeUnique_);
+		} else {
+			assert(is_symbol(Sym));
+		};
+	
+		auto Q = Self.query(Sym);
+		if (Q.isNull) {
+			if (ArgC == 3) {return Else;};
+			throw new Exception(`reference to undefined symbol`);
+		};
+		return Q.Val;
+	};
+	
+	@(`def`) static extern(C) Valº ns_define(
+		size_t ArgC, typeof(this) Self, Atomº Name, Htableº AttribDict, Valº Val
+	) in {
+		assert(ArgC == 4);
+		assert(is_atom(Name));
+		assert(AttribDict is Valº.init || is_htable(AttribDict));
+	} body {
+		Self.define(
+			Name,
+			AttribDict !is Valº.init ? AttribDict.O : null,
+			Val
+		);
+		return Valº.init;
+	};
+
+	debug @(`dump`) auto dump() {
+		return Utf8º(dump_val(SelfSym));
 	};
 };
 
-Namespaceº namespace(string Name, Namespaceº Parent) {
-	return namespace(Name, Maybeº!Namespaceº(Parent), No_.IsolateSubSyms);
-};
-Namespaceº namespace(
-	string Name,
-	Maybeº!Namespaceº Parent = Maybeº!Namespaceº.init,
-	Flag_!q{IsolateSubSyms} Iso = No_.IsolateSubSyms
-) out (X) {
-	assert(X.HasParent == X.O.Parent.NonNil);
-} body {
-	return Namespaceº(Name,Parent,Iso);
-};
-
-bool is_namespace(Valº V) {return V.Func is cast(Funcº) &voke_namespace!();};
-
-extern(C) Valº voke_namespace()(size_t ArgC, Namespaceº Self, Atomº Key) in {
-	assert(ArgC == 2);
-	assert(is_atom(Key));
-} body {
-	return [
-		Atomº(`at`) : delegate {
-			Self.Func = cast(Funcº) &ns_get!();
-			return cast(Valº) Self;
-		},
-		Atomº(`def`) : delegate {
-			Self.Func = cast(Funcº) &ns_define!();
-			return cast(Valº) Self;
-		},
-		Atomº(`root`) : {
-			while (Self.HasParent) {Self = Self.O.Parent;};
-			return cast(Valº) Self;
-		},
-	].get(Key, delegate() => Valº.init)();
-};
-
-extern(C) Valº ns_get()(
-	size_t ArgC,
-	Namespaceº Self,
-	Symbolº Sym,
-	Valº Else
-) in {
-	assert(ordered_(2, ArgC, 3));
-} body {
-	if (is_atom(cast(Valº) Sym)) {
-		Sym = Symbolº((cast(Atomº) Sym).Txt.assumeUnique_);
-	} else {
-		assert(is_symbol(Sym));
-	};
-
-	auto Q = Self.query(Sym);
-	if (Q.isNull) {
-		if (ArgC == 3) {return Else;};
-		throw new Exception(`reference to undefined symbol`);
-	};
-	return Q.Val;
-};
-
-extern(C) Valº ns_define()(
-	size_t ArgC,
-	Namespaceº Self,
-	Atomº Name,
-	Htableº AttribDict,
-	Valº Val
-) in {
-	assert(ArgC == 4);
-	assert(is_atom(Name));
-	assert(AttribDict is Valº.init || is_htable(AttribDict));
-} body {
-	Self.define(
-		Name,
-		AttribDict !is Valº.init ? AttribDict.O : null,
-		Val
-	);
-	return Valº.init;
-};
+bool is_namespace(Valº V) {return V.Func is Namespaceº.init.Func;};
 
 /* -- symbol type -- */
 
@@ -564,6 +755,10 @@ struct Symbolº {
 	version (none) @(`to-source`) Utf8º to_source() {
 		return (!HasParent ? Utf8º.init : Parent.to_source~`:`)~Name;
 	};
+
+	debug @(`dump`) auto dump() {
+		return Utf8º(HasParent ? dump_val(Parent)~`:`~Name : Name);
+	};
 };
 
 bool is_symbol(Valº V) {
@@ -603,7 +798,7 @@ struct Invocationº {
 		size_t Len = 1 + walkLength_(Xs.save);
 		Valº* Elems = Rt_.valigned_malloc!Valº(null, Len);
 		Elems[0] = Vokee;
-		copy_(Xs, Elems[1 .. Len]);
+		copy_(Xs.save, Elems[1 .. Len]);
 		InvokeePtr = Elems;
 		Params = Elems[1 .. Len];
 	};
@@ -611,6 +806,10 @@ struct Invocationº {
 	@(`invokee`) @property auto Invokee() {return *InvokeePtr;};
 
 	@(`params`) @property auto Tail() {return Csliceº(Params[]);};
+
+	debug @(`dump`) auto dump() {
+		return Utf8º(dump_val(*InvokeePtr)~dump_val(Csliceº(Params[])));
+	};
 };
 
 bool is_invocation(Valº V) {
@@ -669,7 +868,9 @@ struct Csliceº {
 		return typeof(this)(New);
 	};
 
-	@(`at`) static extern(C) Valº at(size_t ArgC, Csliceº Self, Valº IdxV) in {
+	@(`at`) static extern(C) Valº at(
+		size_t ArgC, typeof(this) Self, Valº IdxV
+	) in {
 		assert(ArgC == 2);
 	} body {
 		ptrdiff_t Idx = val_to_ptrdiff_t(IdxV);
@@ -681,7 +882,7 @@ struct Csliceº {
 	};
 
 	@(`slic`) static extern(C) typeof(this) slice(
-		size_t ArgC, Csliceº Self, Valº V1, Valº V2
+		size_t ArgC, typeof(this) Self, Valº V1, Valº V2
 	) in {
 		assert(ArgC.among_(2, 3));
 	} out (X) {
@@ -700,8 +901,12 @@ struct Csliceº {
 		return typeof(this)(Self.Elems[Idx1 .. Idx2]);
 	};
 
-	static Valº[] alloc(size_t Len) {
+	private static Valº[] alloc(size_t Len) {
 		return Rt_.valigned_malloc!Valº(null, Len)[0 .. Len];
+	};
+
+	debug @(`dump`) auto dump() {
+		return Utf8º(`(`~Elems[].map_!(X => dump_val(X)).join_(` `)~`)`);
 	};
 };
 
@@ -831,6 +1036,10 @@ struct Utf8º {
 		size_t End = Start + toUTFindex_(Self.Txt[Start .. $], Idx2 - Idx1);
 		return typeof(this)(Self.Txt[Start .. End]);
 	};
+
+	debug @(`dump`) auto dump() {
+		return Utf8º('`'~Txt~'`');
+	};
 };
 
 bool is_utf8(Valº V) {
@@ -852,12 +1061,12 @@ struct Int64º {
 	mixin ValSubType;
 
 	invariant {
-		assert(Hash == Hash_.hashOf(Num));
+		assert(Hash == hash_of_(Num));
 	};
 
 	this(long X) pure @safe nothrow {
 		Num = X;
-		Hash = Hash_.hashOf(X);
+		Hash = hash_of_(X);
 	};
 
 	string toString() const {
@@ -1071,15 +1280,15 @@ struct Decimalº {
 		);
 	};
 
-	@(`cmp`) static extern(C) auto cmp(
-		size_t ArgC, typeof(this) Self, typeof(this) A
+	@(`cmpr`) static extern(C) auto cmp(
+		size_t ArgC, typeof(this) Self, Valº A
 	) in {
 		assert(ArgC == 2);
 		assert(is_decimal(A));
 	} out (X) {
 		assert(ordered_(-1, cast(long) X, 1));
 	} body {
-		return Int64º(MpDec_.cmp_total!int(Self.Num, A.Num));
+		return Int64º(MpDec_.cmp_total!int(Self.Num, (cast(Decimalº) A).Num));
 	};
 
 	@(`to-hash`) auto to_hash_integer() const {
@@ -1132,6 +1341,10 @@ struct Decimalº {
 		assert(X.Num);
 	} body {
 		return typeof(this)([DynDecº.from_bytes(Src)].ptr);
+	};
+
+	debug @(`dump`) auto dump() {
+		return Utf8º(toString.translate_(['.' : ',']));
 	};
 };
 
@@ -1195,7 +1408,7 @@ struct DynDecº {
 		return to_bytes()
 			.chunks_(BufSz)
 			.map_!buffer
-			.fold_!((Acc, Buf) => Hash_.hashOf(Buf, Acc))(size_t(0))
+			.fold_!((Acc, Buf) => hash_of_(Buf, Acc))(size_t(0))
 		;
 	};
 
@@ -1333,139 +1546,6 @@ auto val_to_ptrdiff_t(Valº V) {
 	assert(0);
 };
 
-/* -- atom type -- */
-
-struct Atomº {
-	Funcº Func = dispatch_methods!(typeof(this));
-	union {
-		char[size_t.sizeof * 2] ShortStr;
-		struct {
-			immutable(char)* LongStr;
-			size_t LongStrHash;
-		};
-		size_t[2] Payload;
-	};
-	size_t Len;
-
-	alias PtrCount = (typeof(this) X) => (X.IsShort ? 0 : 1);
-	mixin ValSubType;
-
-	invariant {
-		if (Len > ShortStr.length) {
-			assert(LongStrHash == Hash_.hashOf(LongStr[0 .. Len]));
-		};
-	};
-
-	this(string Src) out (A) {
-		assert(A.InternalTxt == Src);
-		if (!A.IsShort) {
-			assert(Hash_.hashOf(Src) == A.toHash);
-		};
-	} body {
-		Len = Src.length;
-		Payload = [0, 0];
-		if (Src.length <= ShortStr.length) {
-			ShortStr[0 .. Src.length] = Src;
-		} else {
-			LongStr = Src.ptr;
-			LongStrHash = Hash_.hashOf(Src);
-		};
-	};
-
-	size_t toHash() const @trusted pure nothrow in {
-		assert(is_atom(this));
-	} body {
-		return IsShort ? (Payload[0]^Payload[1]) : LongStrHash;
-	};
-
-	@property char[] Txt() const {return InternalTxt.dup;};
-	private @property const(char)[] InternalTxt() const {
-		if (IsShort) {
-			return ShortStr[0 .. Len];
-		} else {
-			return LongStr[0 .. Len];
-		};
-	};
-
-	@property bool IsShort() const @safe pure nothrow {
-		/* note: this returns false when Len==0, but it doesn't matter */
-		return !((Len - 1) & ~0b111);
-		//return !(((Len - 8) >> 3) ^ 0x1FFFFFFF);
-	};
-	unittest {
-		immutable char[1000] Src;
-		foreach (size_t X; 0 .. Src.length) {
-			auto A = Atomº(Src[0 .. X]);
-			if (A.Len == 0) {continue;};
-			assert(A.IsShort == (A.Len <= ShortStr.length));
-		};
-	};
-
-	bool opEquals()(in auto ref typeof(this) A) const {
-		if (/* these fields must be identical */
-			Func !is A.Func ||
-			Payload[1] != A.Payload[1] ||
-			Len != A.Len
-		) {return false;};
-
-		if (Payload[0] == A.Payload[0]) {return true;};
-		if (IsShort) {return false;};
-		return LongStr[0 .. Len] == A.LongStr[0 .. Len];
-	};
-
-	version (none) @(`to-source`) auto to_utf8_source() {
-		return utf8(`:`~Txt.assumeUnique_);
-	};
-
-	@(`to-hash`) auto to_hash_integer() {
-		return Int64º(toHash);
-	};
-
-	@(`=`) static extern(C) Valº equals(size_t ArgC, Atomº Self, Atomº X) in {
-		assert(ArgC == 2);
-	} body {
-		return bool_val(Self == X);
-	};
-};
-
-bool is_atom(Valº V) @trusted pure nothrow @nogc {
-	return V.Func is Atomº.init.Func;
-};
-
-unittest {
-	assert(Atomº(``) == Atomº(``));
-	assert(Atomº(``).toHash == Atomº(``).toHash);
-	assert(Atomº(`x`) == Atomº(`x`));
-	assert(Atomº(`x`).toHash == Atomº(`x`).toHash);
-	assert(Atomº(`x`) != Atomº(`y`));
-	assert(Atomº(`x`).toHash != Atomº(`y`).toHash);
-	assert(Atomº(`asdfghja`).IsShort);
-	assert(!Atomº(`asdfghjaw`).IsShort);
-	assert(Atomº(`asdfghjawww`).toHash);
-	auto S = randomUUID_().toString;
-	assert(Atomº(S) == Atomº(S));
-	assert(Atomº(S).toHash == Atomº(S).toHash);
-	assert(Atomº(S) != Atomº(randomUUID_().toString));
-	assert(Atomº(S).toHash != Atomº(randomUUID_().toString).toHash);
-};
-
-private struct CtfeAtomº {
-	auto Func = Atomº.init.Func;
-	char[2 * size_t.sizeof] ShortStr = '\0';
-	size_t Len;
-
-	alias Val this;
-	@property auto ref Val()() inout {return *(cast(inout Valº*) &this);};
-	static assert(this.sizeof == Valº.sizeof);
-
-	this(string Src) in {
-		assert(Src.length <= ShortStr.length);
-	} body {
-		Len = Src.length;
-		ShortStr[0 .. Len] = Src;
-	};
-};
-
 /* --- hash-tree type --- */
 
 struct Htreeº {
@@ -1477,11 +1557,18 @@ struct Htreeº {
 	*/
 
 	Funcº Func = dispatch_methods!(typeof(this));
-	HtreeRootº Root;
+	private HtreeRootº Root;
+	private size_t TotalLeafCount;
 	enum PtrCount = 1;
-	mixin ValSubType!1;
+	mixin ValSubType;
 
-	private this(HtreeRootº R) {Root = R;};
+	private this(HtreeRootº R, size_t C) {Root = R; TotalLeafCount = C;};
+
+	@property auto Count() const {return TotalLeafCount;};
+
+	@(`#`) @property auto CountInt64() const {
+		return Int64º(Count);
+	};
 
 	@(`at`) static extern(C) Valº at(
 		size_t ArgC, typeof(this) Self, Valº Key, Valº Else
@@ -1494,61 +1581,82 @@ struct Htreeº {
 		);
 	};
 
-	version (none) @(`#`) @property auto LeafCount() {
-		return Int64º(
-			Root.visit_!(
-				(immutable HtreeBranchº X) => X.LeafCount,
-				() => 0,
-				(HtreeLeafº* X) => 1,
-			)
-		);
-	};
-
 	@(`asoc`) static extern(C) typeof(this) asoc(
 		size_t ArgC, typeof(this) Self, Valº Key, Valº Val
 	) out (X) {
 		assert(X.Root.hasValue);
 	} body {
-		auto Leaf = HtreeLeafº.alloc(Key, Val);
 		/* insert a leaf; overwrite if it already exists */
-		return typeof(this)(Self.Root.visit_!(
-			() => HtreeRootº(Leaf),
-			(HtreeLeafº* X) => HtreeRootº(
-				HtreeBitmapº
-					.of(hash_of(X.Key), 0, X)
-					.asoc(hash_of(Leaf.Key), 0, Leaf)
+		return Self.Root.visit_!(
+			() => typeof(this)(
+				HtreeRootº(HtreeLeafº.alloc(Key, Val)),
+				1
 			),
-			(immutable HtreeBranchº X) => cast(HtreeRootº)
-				X.asoc(hash_of(Key), 0, Leaf)
-			,
-		));
+			(HtreeLeafº* X) {
+				if (*X is HtreeLeafº(Key, Val)) {/* no change */
+					return Self;
+				};
+				if (keys_equal(Key, X.Key)) {/* overwrite */
+					return typeof(this)(
+						HtreeRootº(HtreeLeafº.alloc(Key, Val)),
+						1
+					);
+				};
+				auto New = HtreeBitmapº
+					.of(hash_of(X.Key), 0, X)
+					.asoc(hash_of(Key), 0, HtreeLeafº.alloc(Key, Val))
+				;
+				return typeof(this)(
+					HtreeRootº(New),
+					2
+				);
+			},
+			(immutable HtreeBranchº X) {
+				auto New = X.asoc(hash_of(Key), 0, HtreeLeafº.alloc(Key, Val));
+				if (X is New) {
+					return Self; /* no change */
+				};
+				return typeof(this)(
+					cast(HtreeRootº) New,
+					Self.Count + 1
+				);
+			},
+		);
 	};
 
 	@(`disoc`) static extern(C) typeof(this) disoc(
 		size_t ArgC, typeof(this) Self, Valº Key
 	) {
-		/* remove a k/v pair; overwrite if it already exists */
-		return typeof(this)(Self.Root.visit_!(
-			() => HtreeRootº(),
-			(HtreeLeafº* X) => keys_equal(Key, X.Key) ?
-				HtreeRootº()
-			:
-				HtreeRootº(X)
-			,
-			(immutable HtreeBranchº X) => cast(HtreeRootº)
-				X.disoc(hash_of(Key), 0, Key)
-			,
-		));
+		/* remove a k/v pair; do nothing if it doesn't exist */
+		return Self.Root.visit_!(
+			() => typeof(this).init,
+			(HtreeLeafº* X) {
+				if (keys_equal(Key, X.Key)) {
+					return typeof(this).init;
+				};
+				return Self; /* no change */
+			},
+			(immutable HtreeBranchº X) {
+				auto New = X.disoc(hash_of(Key), 0, Key);
+				if (New.peek!(typeof(X)) && X is *New.peek!(typeof(X))) {
+					return Self; /* no change */
+				};
+				return typeof(this)(
+					cast(HtreeRootº) New,
+					Self.Count - 1
+				);
+			},
+		);
 	};
 
 	private static uint hash_of(Valº Key) {
 		static assert(is(uint == size_t));
-		return val_to_size_t(Key.voke!(`to-hash`));
+		return val_to_size_t(Key.voke!`to-hash`);
 	};
 
 	private static bool keys_equal(Valº K1, Valº K2) {
 		if (K1 is K2) {return true;};
-		return K1.voke!(`=`).voke(K2) !is Valº.init;
+		return K1.voke!`=`.voke(K2) !is Valº.init;
 	};
 
 	debug string dump() {
@@ -1598,7 +1706,7 @@ private extern(C++) abstract class HtreeBranchº {extern(D) {
 	/* sub-tree; contains one or more leaves */
 
 	/* total number of leaves contained within the subtree */
-	@property size_t LeafCount() const;
+	version (none) @property size_t LeafCount() const;
 
 	/* lookup an element; return `Else` on failure */
 	Valº at(uint Hash, uint Sh, Valº Key, Valº Else) const;
@@ -1618,7 +1726,7 @@ private extern(C++) class HtreeBitmapº : HtreeBranchº {extern(D) {
 	/* bitmapped branch node */
 	uint LeafBmp; /* indicates which elements are leaves */
 	uint BranchBmp; /* indicates which elements are branches */
-	void*[0] Nodes; /* payload: up to 32 leaves/branches */
+	void*[0] Nodes; /* payload: up to 32 (pointers to) leaves/branches */
 
 	alias ImmBrº = immutable HtreeBranchº;
 
@@ -1642,8 +1750,8 @@ private extern(C++) class HtreeBitmapº : HtreeBranchº {extern(D) {
 		assert(L);
 		assert(Sh % 5 == 0);
 	} out (X) {
-		assert(popcnt(X.LeafBmp) == 1);
-		assert(popcnt(X.BranchBmp) == 0);
+		assert(popcnt_(X.LeafBmp) == 1);
+		assert(popcnt_(X.BranchBmp) == 0);
 	} body {
 		auto X = alloc_instance(1);
 		X.LeafBmp = bitpos(Hash >> Sh);
@@ -1655,8 +1763,8 @@ private extern(C++) class HtreeBitmapº : HtreeBranchº {extern(D) {
 		assert(C);
 		assert(Sh % 5 == 0);
 	} out (X) {
-		assert(popcnt(X.LeafBmp) == 0);
-		assert(popcnt(X.BranchBmp) == 1);
+		assert(popcnt_(X.LeafBmp) == 0);
+		assert(popcnt_(X.BranchBmp) == 1);
 	} body {
 		auto X = alloc_instance(1);
 		X.BranchBmp = bitpos(Hash >> Sh);
@@ -1664,7 +1772,7 @@ private extern(C++) class HtreeBitmapº : HtreeBranchº {extern(D) {
 		return cast(immutable) X;
 	};
 
-	override @property size_t LeafCount() const {
+	version (none) override @property size_t LeafCount() const {
 		size_t C;
 		foreach (Pos; 0 .. 32) {
 			uint Bit = 1 << Pos;
@@ -1672,11 +1780,11 @@ private extern(C++) class HtreeBitmapº : HtreeBranchº {extern(D) {
 				C += (cast(ImmBrº) Nodes.ptr[index(Bit)]).LeafCount;
 			};
 		};
-		return C + popcnt(LeafBmp);
+		return C + popcnt_(LeafBmp);
 	};
 
 	@property size_t Length() @safe pure nothrow const {
-		return popcnt(LeafBmp|BranchBmp);
+		return popcnt_(LeafBmp|BranchBmp);
 	};
 
 	override Valº at(uint Hash, uint Sh, Valº Key, Valº Else) const in {
@@ -1870,17 +1978,7 @@ private extern(C++) class HtreeBitmapº : HtreeBranchº {extern(D) {
 
 	ubyte index(uint Bit) @safe pure nothrow @nogc const {
 		/* `Nodes` array index of the element indicated by `Bit` */
-		return popcnt((LeafBmp|BranchBmp) & (Bit - 1));
-	};
-
-	static ubyte popcnt(uint X) @safe pure nothrow @nogc {
-		/* stolen from openjdk 9 */
-		X = X - ((X >> 1) & 0x55555555u);
-		X = (X & 0x33333333u) + ((X >> 2) & 0x33333333u);
-		X = (X + (X >> 4)) & 0x0f0f0f0fu;
-		X = X + (X >> 8);
-		X = X + (X >> 16);
-		return X & 0x3fu;
+		return cast(ubyte) popcnt_((LeafBmp|BranchBmp) & (Bit - 1));
 	};
 
 	debug override string dump() {
@@ -1921,7 +2019,7 @@ private extern(C++) class HtreeCollisionº : HtreeBranchº {extern(D) {
 		return cast(immutable) X;
 	};
 
-	override @property size_t LeafCount() const {return Len;};
+	version (none) override @property size_t LeafCount() const {return Len;};
 
 	override Valº at(uint Hash, uint, Valº Key, Valº Else) const in {
 		assert(Sh % 5 == 0);
@@ -2039,11 +2137,11 @@ private extern(C++) class HtreeCollisionº : HtreeBranchº {extern(D) {
 
 unittest {
 	auto Tr = Htreeº.init;
-	assert(Tr.voke!(`at`).voke(Atomº(`foo`), Atomº(`nf`)) is Atomº(`nf`));
+	assert(Tr.voke!`at`.voke(Atomº(`foo`), Atomº(`nf`)) is Atomº(`nf`));
 
-	auto Tr2 = Tr.voke!(`asoc`).voke(Atomº(`foo`), Decimalº(22));
+	auto Tr2 = Tr.voke!`asoc`.voke(Atomº(`foo`), Decimalº(22));
 	{
-		auto x = Tr2.voke!(`at`).voke(Atomº(`foo`), Atomº(`nf`));
+		auto x = Tr2.voke!`at`.voke(Atomº(`foo`), Atomº(`nf`));
 		assert(x.is_decimal);
 		assert((cast(Decimalº) x) == Decimalº(22));
 	};
@@ -2061,26 +2159,26 @@ unittest {
 	};
 
 	foreach (Idx; 0 .. Count) {
-		//assert(val_to_size_t(Tr.voke!(`#`)) == Idx);
+		assert(val_to_size_t(Tr.voke!(`#`)) == Idx);
 		assert(Tr.voke_u!(`at`).voke_u(Keys[Idx], InvalidVal) is InvalidVal);
 
-		Tr = cast(Htreeº) Tr.voke_u!(`asoc`).voke_u(Keys[Idx], Vals[Idx]);
+		Tr = cast(Htreeº) Tr.voke_u!`asoc`.voke_u(Keys[Idx], Vals[Idx]);
 		//auto x = Tr.dump();
 
-		//assert(val_to_size_t(Tr.voke!(`#`)) == Idx + 1);
+		assert(val_to_size_t(Tr.voke!(`#`)) == Idx + 1);
 		assert(Tr.voke_u!(`at`).voke_u(Keys[Idx], InvalidVal) is Vals[Idx]);
 	};
 
 	foreach (Idx; 0 .. Count) {
-		//assert(val_to_size_t(Tr.voke!(`#`)) == Count - Idx);
+		assert(val_to_size_t(Tr.voke!(`#`)) == Count - Idx);
 		assert(Tr.voke_u!(`at`).voke_u(Keys[Idx], InvalidVal) is Vals[Idx]);
 
-		Tr = cast(Htreeº) Tr.voke_u!(`disoc`).voke_u(Keys[Idx]);
+		Tr = cast(Htreeº) Tr.voke_u!`disoc`.voke_u(Keys[Idx]);
 
 		assert(Tr.voke_u!(`at`).voke_u(Keys[Idx], InvalidVal) is InvalidVal);
 	};
 
-	//assert(val_to_size_t(Tr.voke!(`#`)) == 0);
+	assert(val_to_size_t(Tr.voke!(`#`)) == 0);
 };
 
 /* --- array-tree type --- */
@@ -2095,7 +2193,7 @@ struct Atreeº {
 
 	Funcº Func = dispatch_methods!(typeof(this));
 	Branchº* Root = &EmptyBranch;
-	Leafº* Tail = &EmptyLeaf;
+	Valº* Tail = EmptyLeaf.ptr;
 	auto Attr = Attrº(0, 5);
 	enum PtrCount = 2;
 	mixin ValSubType;
@@ -2106,22 +2204,91 @@ struct Atreeº {
 	private static __gshared Leafº EmptyLeaf; /* (immutable) */
 
 	@disable this();
+	private this(int) {};
 	private this(typeof(Attr) A, typeof(Root) R, typeof(Tail) T) {
 		Attr = A; Root = R; Tail = T;
 	};
 
 	this(Tº)(Tº Src) if (isInputRange_!Tº && is(ElementType_!Tº : Valº)) {
-		foreach (X; Src) {this = this~X;};
+		/* construct atree from any value range */
+
+		static auto alloc_copy(Xº)(ref Xº Xs) {
+			auto Arr = Rt_.valigned_malloc!Valº(null, Xs.length)[0 ..Xs.length];
+			copy_(Xs, Arr);
+			return Arr;
+		};
+
+		static if (hasLength_!Tº) {
+			/* allocate all the leaves at once */
+			this = adopt(alloc_copy(Src));
+			return;
+		};
+
+		static Valº[] take_copy_and_drop(ref Tº Xs) {
+			/* pop up to 32 elements off the front of X
+			and copy them into a new tail/leaf array */
+			Valº[Leafº.length] Buf;
+			size_t Len;
+			while (Len < Buf.length && !Xs.empty) {
+				Buf[Len++] = Xs.front;
+				Xs.popFront();
+			};
+			auto Ys = Buf[0 .. Len];
+			return alloc_copy(Ys);
+		};
+
+		/* allocate leaves one at a time */
+		this = adopt(take_copy_and_drop(Src));
+		while (!Src.empty) {/* insert slices until the source is depleted */
+			this = overflow_tail(take_copy_and_drop(Src));
+		};
 	};
 
-	@property size_t length() {return Attr.Count;};
+	static auto adopt(Valº[] Src) in {/* construct atree using slices of Src */
+		assert(X86_.is_valigned(cast(size_t) Src.ptr));
+	} out (R) {
+		assert(R.length == Src.length);
+		if (R.length) {
+			assert(R.Tail is &Src[$ - R.TailLen]);
+		};
+		if (R.length > Leafº.length) {
+			assert((cast(Valº*) R.leaf_for(0)) is Src.ptr);
+		};
+	} body {
+		if (Src == []) {return typeof(this)(0);};
+
+		static Valº[] take_and_drop(ref Valº[] Xs) {
+			size_t N = min_(Xs.length, Leafº.length);
+			Valº[] Sub = Xs[0 .. N];
+			Xs = Xs[N .. $];
+			return Sub;
+		};
+
+		auto Xs = Src;
+
+		/* initialise the tail with up to 32 elems from front of Src */
+		Valº[] FirstSlice = take_and_drop(Xs);
+		auto R = typeof(this)(
+			Attrº(FirstSlice.length, 5),
+			&EmptyBranch,
+			FirstSlice.ptr
+		);
+
+		while (Xs != []) {/* insert slices until the source is depleted */
+			R = R.overflow_tail(take_and_drop(Xs));
+		};
+
+		return R;
+	};
+
+	@property size_t length() const {return Attr.Count;};
 	alias opDollar(size_t X : 0) = length;
 
 	Valº opIndex(size_t Idx) {
 		version (D_NoBoundsChecks) {} else {
 			enforceEx_!RangeError_(Idx < Attr.Count);
 		};
-		return (*leaf_for(Idx))[Idx & 0x01f];
+		return (*leaf_for(Idx))[Idx & 0b11111];
 	};
 
 	AtreeSliceº opIndex() {
@@ -2137,48 +2304,54 @@ struct Atreeº {
 
 	size_t[2] opSlice(size_t Pos)(size_t S, size_t E) {return [S, E];};
 
-	@property size_t TailIdx() {
+	@property size_t TailIdx() const {
 		if (Attr.Count < 32) {return 0;};
 		return ((Attr.Count - 1) >>> 5) << 5;
 	};
 
-	@property size_t TailLen() {
+	@property size_t TailLen() const {
 		return Attr.Count - TailIdx;
 	};
+
+
 
 	typeof(this) opBinary(string Op : `~`)(Valº Val) {
 		/* atree ~ val */
 
 		/* room in tail? */
 		if (TailLen < 32) {
-			auto NewTail = dup_node(Tail);
-			(*NewTail)[TailLen] = Val;
+			auto NewTail = extend_tail(Tail[0 .. TailLen], Val);
 			return typeof(this)(
 				Attrº(Attr.Count + 1, Attr.Shift),
 				Root,
-				NewTail
+				NewTail.ptr
 			);
 		};
 
 		/* full tail, push into tree */
+		return overflow_tail(extend_tail([], Val));
+	};
+
+	private typeof(this) overflow_tail(Valº[] NewTail) in {
+		assert(TailLen == Leafº.length);
+		assert(NewTail.length <= Leafº.length);
+	} body {
+		Leafº* TailLeaf = cast(Leafº*) Tail;
 		Branchº* NewRoot;
-		Leafº* TailNode = dup_node(Tail);
 		auto NewShift = Attr.Shift;
 		/* overflow root? */
 		if ((Attr.Count >>> 5) > (1 << Attr.Shift)) {
 			NewRoot = dup_node(Branchº.init);
-			(*NewRoot)[0 .. 2] = [Root, new_path(Attr.Shift, TailNode)];
+			(*NewRoot)[0 .. 2] = [Root, new_path(Attr.Shift, TailLeaf)];
 			NewShift += 5;
 		} else {
-			NewRoot = push_tail(Attr.Shift, Root, TailNode);
+			NewRoot = push_tail(Attr.Shift, Root, TailLeaf);
 		};
 
-		auto NewTail = dup_node(Leafº.init);
-		NewTail[0] = Val;
 		return typeof(this)(
-			Attrº(Attr.Count + 1, NewShift),
+			Attrº(Attr.Count + NewTail.length, NewShift),
 			NewRoot,
-			NewTail
+			NewTail.ptr
 		);
 	};
 
@@ -2193,9 +2366,13 @@ struct Atreeº {
 		};
 
 		if (Idx >= TailIdx) {
-			auto NewTail = dup_node(Tail);
-			(*NewTail)[Idx & 0x01f] = Val;
-			return typeof(this)(Attr, Root, NewTail);
+			Idx &= 0b11111;
+			auto NewTail = dup_tail(
+				Tail[0 .. TailLen],
+				max_(Idx + 1, TailLen)
+			);
+			NewTail[Idx] = Val;
+			return typeof(this)(Attr, Root, NewTail.ptr);
 
 		} else {
 			return typeof(this)(
@@ -2211,12 +2388,12 @@ struct Atreeº {
 	) {
 		if (Level == 0) {
 			Leafº* Ret = dup_node(cast(Leafº*) Node);
-			(*Ret)[Idx & 0x01f] = Val;
+			(*Ret)[Idx & 0b11111] = Val;
 			return Ret;
 
 		} else {
 			Branchº* Ret = dup_node(cast(Branchº*) Node);
-			uint SubIdx = (Idx >>> Level) & 0x01f;
+			uint SubIdx = (Idx >>> Level) & 0b11111;
 			(*Ret)[SubIdx] = tree_asoc(
 				Level - 5,
 				(* cast(Branchº*) Node)[SubIdx],
@@ -2233,22 +2410,21 @@ struct Atreeº {
 			enforceEx_!RangeError_(Attr.Count > 0);
 		};
 
-		if (Attr.Count == 1) {
+		if (Attr.Count == 1) {/* last element */
 			return this.init;
 		};
 
-		if (TailLen > 1) {
-			Leafº* NewTail = dup_node(Tail);
-			(*NewTail)[TailLen - 1] = Valº.init;
+		if (TailLen > 1) {/* just decrement the length */
 			return typeof(this)(
 				Attrº(Attr.Count - 1, Attr.Shift),
 				Root,
-				NewTail
+				Tail
 			);
 		};
 
-		Leafº* Newtail = leaf_for(Attr.Count - 2);
+		/* move the last leaf to the tail position */
 
+		auto Newtail = cast(Valº*) leaf_for(Attr.Count - 2);
 		Branchº* NewRoot = cast(Branchº*) trunc_tail(Attr.Shift, Root);
 		uint NewShift = Attr.Shift;
 		if (NewRoot is null) {
@@ -2266,7 +2442,7 @@ struct Atreeº {
 	};
 
 	private void* trunc_tail(int Level, void* Node) {
-		int SubIdx = ((Attr.Count - 2) >>> Level) & 0x01f;
+		int SubIdx = ((Attr.Count - 2) >>> Level) & 0b11111;
 		if (Level > 5) {
 			void* NewChild = trunc_tail(
 				Level - 5, (* cast(Branchº*) Node)[SubIdx]
@@ -2297,7 +2473,7 @@ struct Atreeº {
 		else alloc new path
 		return nodeToInsert placed in copy of parent */
 
-		size_t SubIdx = ((Attr.Count - 1) >>> Level) & 0x01f;
+		size_t SubIdx = ((Attr.Count - 1) >>> Level) & 0b11111;
 		auto Ret = dup_node(cast(Branchº*) Parent);
 		if (Level == 5) {
 			(*Ret)[SubIdx] = TailNode;
@@ -2323,14 +2499,16 @@ struct Atreeº {
 		return Ret;
 	};
 
-	private Leafº* leaf_for(size_t Idx) {
-		if (Idx >= TailIdx) {return Tail;};
+	private inout(Leafº)* leaf_for(size_t Idx) inout in {
+		assert(Idx < Attr.Count);
+	} body {
+		if (Idx >= TailIdx) {return cast(inout(Leafº)*) Tail;};
 
 		auto Node = cast(Branchº*) Root;
 		for (uint Level = Attr.Shift; Level > 0; Level -= 5) {
-			Node = cast(Branchº*) (*Node)[(Idx >>> Level) & 0x01f];
+			Node = cast(Branchº*) (*Node)[(Idx >>> Level) & 0b11111];
 		};
-		return cast(Leafº*) Node;
+		return cast(inout(Leafº)*) Node;
 	};
 
 	private static Tº* dup_node(Tº)(Tº* Node) if (
@@ -2348,6 +2526,23 @@ struct Atreeº {
 		is(Tº == Branchº) || is(Tº == Leafº)
 	) {
 		return dup_node(&Node);
+	};
+
+	private static Valº[] extend_tail(Valº[] X, Valº Elem) {
+		auto New = cast(Valº*) dup_tail(X, X.length + 1);
+		New[X.length] = Elem;
+		return New[0 .. X.length + 1];
+	};
+
+	private static Valº[] dup_tail(Valº[] X, size_t NewLen) in {
+		assert(NewLen >= X.length);
+	} body {
+		auto New = cast(Valº*) Rt_.valigned_malloc!Valº(null, NewLen);
+		New[0 .. X.length] = X[];
+		return New[0 .. NewLen];
+	};
+	private static auto dup_tail(Valº[] X) {
+		return dup_tail(X, X.length);
 	};
 
 	private struct Attrº {
@@ -2378,20 +2573,68 @@ struct Atreeº {
 		/* unions can be unreliable at initialising fields */
 		assert(typeof(this).init.Func !is null);
 		assert(typeof(this).init.Root is &EmptyBranch);
-		assert(typeof(this).init.Tail is &EmptyLeaf);
+		assert(typeof(this).init.Tail is EmptyLeaf.ptr);
 		assert(typeof(this).init.Attr is Attrº(0, 5));
 		auto A = typeof(this).init;
 		assert(A.Func is typeof(this).init.Func);
 		assert(A.Root is &EmptyBranch);
-		assert(A.Tail is &EmptyLeaf);
+		assert(A.Tail is EmptyLeaf.ptr);
 		assert(A.Attr is Attrº(0, 5));
 		version (none) {/* don't try to initialise this way */
 			typeof(this) B;
 			assert(B.Func is typeof(this).init.Func);
 			assert(B.Root is &EmptyBranch);
-			assert(B.Tail is &EmptyLeaf);
+			assert(B.Tail is EmptyLeaf.ptr);
 			assert(B.Attr is Attrº(0, 5));
 		};
+	};
+
+	@(`front?`) auto nonempty() {
+		return bool_val(!!length);
+	};
+
+	@(`front`) auto front() {
+		return this[0];
+	};
+
+	@(`next`) auto next() {
+		return this[1 .. $];
+	};
+
+	@(`len`) auto length_int64() {
+		return Int64º(length);
+	};
+
+	@(`at`) static extern(C) Valº at(
+		size_t ArgC, typeof(this) Self, Valº IdxV
+	) in {
+		assert(ArgC == 2);
+	} body {
+		ptrdiff_t Idx = val_to_ptrdiff_t(IdxV);
+		if (Idx < 0) {Idx += Self.length;};
+		version (D_NoBoundsChecks) {} else {
+			enforceEx_!RangeError_(ordered_(0, Idx, Self.length));
+		};
+		return Self[Idx];
+	};
+
+	@(`slic`) static extern(C) Valº slice(
+		size_t ArgC, typeof(this) Self, Valº V1, Valº V2
+	) in {
+		assert(ArgC.among_(2, 3));
+	} out (X) {
+		//assert(X.length <= Self.length);
+	} body {
+		if (ArgC == 2) {return slice(3, Self, V1, Int64º(Self.length));};
+
+		ptrdiff_t Idx1 = val_to_ptrdiff_t(V1);
+		ptrdiff_t Idx2 = val_to_ptrdiff_t(V2);
+		if (Idx1 < 0) {Idx1 += Self.length;};
+		if (Idx2 < 0) {Idx2 += Self.length;};
+		version (D_NoBoundsChecks) {} else {
+			enforceEx_!RangeError_(ordered_(0, Idx1, Idx2, Self.length));
+		};
+		return Self[Idx1 .. Idx2];
 	};
 };
 
@@ -2454,10 +2697,60 @@ struct AtreeSliceº {
 
 	size_t[2] opSlice(size_t Pos)(size_t S, size_t E) {return [S, E];};
 
-	bool opEquals(typeof(this) A) {return equal_(this[], A[]);};
+	/+bool opEquals(typeof(this) A) {
+		return equal_!((X, Y) => )(this, A);
+	};+/
 
 	typeof(this) opBinary(string Op)(Valº Val) if (Op == `~`) {
 		return typeof(this)((*this.Tree)~Val, Start, End + 1);
+	};
+
+	@(`front?`) auto nonempty() {
+		return bool_val(!!length);
+	};
+
+	@(`front`) auto front_val() {
+		return this[0];
+	};
+
+	@(`next`) auto next() {
+		return this[1 .. $];
+	};
+
+	@(`len`) auto length_int64() {
+		return Int64º(length);
+	};
+
+	@(`at`) static extern(C) Valº at(
+		size_t ArgC, typeof(this) Self, Valº IdxV
+	) in {
+		assert(ArgC == 2);
+	} body {
+		ptrdiff_t Idx = val_to_ptrdiff_t(IdxV);
+		if (Idx < 0) {Idx += Self.length;};
+		version (D_NoBoundsChecks) {} else {
+			enforceEx_!RangeError_(ordered_(0, Idx, Self.length));
+		};
+		return Self[Idx];
+	};
+
+	@(`slic`) static extern(C) Valº slice(
+		size_t ArgC, typeof(this) Self, Valº V1, Valº V2
+	) in {
+		assert(ArgC.among_(2, 3));
+	} out (X) {
+		//assert(X.length <= Self.length);
+	} body {
+		if (ArgC == 2) {return slice(3, Self, V1, Int64º(Self.length));};
+
+		ptrdiff_t Idx1 = val_to_ptrdiff_t(V1);
+		ptrdiff_t Idx2 = val_to_ptrdiff_t(V2);
+		if (Idx1 < 0) {Idx1 += Self.length;};
+		if (Idx2 < 0) {Idx2 += Self.length;};
+		version (D_NoBoundsChecks) {} else {
+			enforceEx_!RangeError_(ordered_(0, Idx1, Idx2, Self.length));
+		};
+		return Self[Idx1 .. Idx2];
 	};
 };
 
@@ -2506,9 +2799,37 @@ unittest {
 	static assert(hasSlicing_!(typeof(A[])));
 	auto S1 = E[];
 	auto F = Atreeº(S1);
-	assert(S1 == F[]);
-	assert(E[] == F[]);
+	//assert(S1 == F[]);
+	//assert(E[] == F[]);
 
+};
+
+unittest {
+	/* adopt */
+	enum Len = 500;
+	Valº[] Arr = Rt_.valigned_malloc!Valº(null, Len)[0 ..Len];
+
+	auto Tree = Atreeº.adopt(Arr);
+	assert(Tree.length == Arr.length);
+
+	foreach (Idx; 0 .. Len) {
+		auto LeafPtr = cast(Valº*) Tree.leaf_for(Idx);
+		assert(ordered_(Arr.ptr, LeafPtr, Arr.ptr + Len));
+	};
+};
+
+unittest {
+	/* copy */
+	auto Arr = new Valº[500];
+
+	InputRange_!Valº Src = inputRangeObject_(Arr);
+	auto Tree = Atreeº(Src);
+	assert(Tree.length == Arr.length);
+
+	foreach (Idx; 0 .. Arr.length) {
+		auto LeafPtr = cast(Valº*) Tree.leaf_for(Idx);
+		assert(!ordered_(Arr.ptr, LeafPtr, Arr.ptr + Arr.length));
+	};
 };
 
 /* -------------------------------------------------------------------------- */
@@ -2623,12 +2944,6 @@ unittest {
 
 /* -------------------------------------------------------------------------- */
 
-version (none) {
-
-
-
-};
-
 /+
 
 struct Int64º {
@@ -2683,7 +2998,7 @@ struct Int64º {
 	};
 
 	size_t toHash() const {
-		return Hash_.hashOf(Mag, Sign);
+		return hash_of_(Mag, Sign);
 	};
 
 	bool opEquals()(auto ref const typeof(this) A) const {

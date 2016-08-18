@@ -1,6 +1,8 @@
 ﻿/* -------------------------------------------------------------------------- */
 
 import Std_;
+version (Windows) import W32_ = core.sys.windows.windows;
+version (Posix) import Mem_ = core.sys.posix.sys.mman;
 
 import Lang_ = language;
 
@@ -43,6 +45,153 @@ unittest {
 	assert(R.equal_(Xs[]));
 };
 
+version (Posix) {
+	enum PageAllAccess = Mem_.PROT_EXEC|Mem_.PROT_READ|Mem_.PROT_WRITE;
+} else version (Windows) {
+	enum PageAllAccess = W32_.PAGE_EXECUTE_READWRITE;
+};
+uint set_page_access(void[] Mem, uint NewAccess) {
+	version (Posix) {
+		enforce_(Mem_.mprotect(
+			Mem.ptr,
+			Mem.length,
+			NewAccess
+		) == 0);
+		return 0;
+
+	} else version (Windows) {
+		uint OriginalAccess;
+		enforce_(W32_.VirtualProtect(
+			Mem.ptr,
+			Mem.length,
+			NewAccess,
+			&OriginalAccess
+		));
+		return OriginalAccess;
+
+	} else {
+		static assert(0);
+	};
+};
+
+/* --- constexpr-enabled associative array --- */
+
+struct StaticHashTblº(
+	Kº, Vº, /+Kº NullKey,+/ alias hash_key, alias keys_eq, size_t Len = 0
+) if (
+	is(typeof(hash_key(Kº.init)) : size_t) &&
+	is(typeof(!!keys_eq(Kº.init, Kº.init)) : bool) &&
+	true//hash_key(NullKey) == hash_key(NullKey) &&
+	//keys_eq(NullKey, NullKey)
+) {
+	alias Pairº = Tuple_!(Kº, Vº);
+	private Pairº[Len] Pairs;// = tuple_(NullKey, Vº.init);
+
+	inout(Vº)* opBinaryRight(string Op : `in`, Tº /+: Kº+/)(Tº Key) inout in {
+		static assert(is(Tº : Kº));
+	} body {
+		auto R = &Pairs[idx_for(Key)];
+		if (keys_eq((*R)[0], Key)) {
+			return &(*R)[1];
+		};
+		return null;
+	};
+
+	template From(alias Src) if (is(typeof(Src) == Pairº[])) {
+		static if (Src == []) {
+			enum From = typeof(this).init;
+		} else {
+			enum From = generate_tbl!IdealLen(Src);
+			enum IdealLen = calc_ideal_len(Src);
+			static assert(IdealLen >= Src.length);
+		};
+	};
+
+	private static auto generate_tbl(size_t Len)(Pairº[] Src) {
+		auto Tbl = StaticHashTblº!(
+			Kº, Vº, /+NullKey,+/ hash_key, keys_eq, Len
+		).init;
+		//foreach (ref X; Tbl.Pairs) {assert(X[0] is NullKey);};
+
+		foreach (ref Pair; Src) {
+			Tbl.Pairs[Tbl.idx_for(Pair[0])] = Pair;
+		};
+		return Tbl;
+	};
+
+	private static size_t calc_ideal_len(Pairº[] Src) {
+		size_t L = next_pow_of_2(Src.length);
+		Retry:;
+		debug (statichashtbl) __ctfeWriteln(
+			`table length: %s, #elems: %s`.format_(L, Src.length)
+		);
+		assert(L < 16*Src.length,
+			`could not find a suitable table size, `
+			`try a different hash function`
+		);
+		auto Slots = new bool[L];
+		foreach (Pair; Src) {
+			auto Idx = idx_for(Pair[0], L);
+			if (Slots[Idx]) {
+				L = next_pow_of_2(L + 1);
+				goto Retry;
+			};
+			Slots[Idx] = true;
+		};
+		return L;
+	};
+
+	enum Of(Xs...) = From!([Xs]);
+
+	version (none) template From(alias Tbl) if (is(typeof(Tbl) == Vº[Kº])) {
+		enum From = From!(Tbl.byPair_.array_);
+	};
+
+	private size_t idx_for(Kº Key) const {return idx_for(Key, Len);};
+	private static size_t idx_for(Kº Key, size_t L) in {
+		assert(L);
+	} body {
+		auto Idx = hash_key(Key) & (L - 1);
+		//auto Idx = hash_key(Key) % L;
+		debug (statichashtbl) __ctfeWriteln(
+			`hash: %b, len: %s, idx: %s, k[0]: %x`.format_(
+				hash_key(Key), L, Idx, Key.Payload[0]
+			)
+		);
+		return Idx;
+	};
+
+	private static size_t next_pow_of_2(in size_t N) pure nothrow @nogc {
+		if (!N) {return 1;};
+		return 1 << (bsr_(N) + !is_pow_of_2(N));
+	};
+
+	private static bool is_pow_of_2(in size_t N) pure nothrow @nogc {
+		return !((N - 1) & N);
+	};
+
+	static assert(is_pow_of_2(Len));
+};
+
+unittest {
+	import core.internal.hash : hashOf_ = hashOf;
+	alias Tblº = StaticHashTblº!(
+		string, int[], //``,
+		X => hashOf_(X),
+		(X, Y) => X == Y
+	);
+
+	enum Tbl = Tblº.Of!(
+		tuple_(`one`, [1,2,3]),
+		tuple_(`two`, [4,5,6]),
+		tuple_(`three`, [7,8,9,0,5,3,3])
+	);
+	assert(*(`one` in Tbl) == [1,2,3]);
+	assert(*(`three` in Tbl) == [7,8,9,0,5,3,3]);
+	assert(`threeee` !in Tbl);
+	assert(`` !in Tbl);
+};
+
 /* --- auto-importing ffi --- */
 
 auto cinvoke(wstring LibName, string FuncName, Rº = void, Pº...)(Pº Params) {
@@ -62,7 +211,6 @@ template LibSymPtr(wstring LibName, string SymName) {
 };
 
 version (Windows) void* import_sym(in wchar* LibName, in char* SymName) {
-	import W32_ = core.sys.windows.windows;
 	auto Lib = W32_.GetModuleHandleW(LibName);
 	if (!Lib) {
 		Lib = W32_.LoadLibraryW(LibName);

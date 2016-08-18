@@ -500,12 +500,14 @@ immutable(Irº) form_to_ir(C_.Namespaceº Ns, Valº_ Form) {
 					X => resolve_form_for_macro(Ns, X)
 				).array_;
 
+				debug writeln_(`expanding macro invocation: `~C_.dump_val(V));
 				Valº_ R;
 				try {
 					R = Q.Val.apply(Params);
 				} catch (Exception X) {
 					throw new Exception(`macro expansion failed: `~X.toString);
 				};
+				debug writeln_(`macro expansion result: `~C_.dump_val(R));
 				return form_to_ir(Ns, R);
 			};
 		};
@@ -517,7 +519,7 @@ immutable(Irº) form_to_ir(C_.Namespaceº Ns, Valº_ Form) {
 	};
 
 	/* can't compile this form */
-	throw new Exception(`invalid form`);
+	throw new Exception(`invalid form: `~C_.dump_val(Form));
 };
 
 immutable(Symbolº) sym_form_to_ir(C_.Symbolº Sym) {
@@ -534,7 +536,7 @@ immutable(Funcº) func_form_to_ir(C_.Namespaceº Ns, Valº_[] Params) {
 	enforce_(C_.is_symbol(Params[0]));
 	auto SelfSym = cast(C_.Symbolº) Params[0];
 	assert(!SelfSym.HasParent);
-	auto NewNs = C_.namespace(
+	auto NewNs = C_.Namespaceº(
 		SelfSym.Name, C_.maybe(Ns), Yes_.IsolateSubSyms
 	);
 
@@ -583,7 +585,7 @@ immutable(Letº) let_form_to_ir(C_.Namespaceº Ns, Valº_[] Params) {
 	auto Bindings = (cast(C_.Csliceº) Params[0]).Elems;
 	enforce_(Bindings.length % 2 == 0);
 
-	auto NewNs = C_.namespace(`let;`~randomUUID_().toString, Ns);
+	auto NewNs = C_.Namespaceº(`let;`~randomUUID_().toString, C_.maybe(Ns));
 	C_.Symbolº[] RawNames;
 	/* traverse the binding form and add the names to the new NS */
 	foreach (B; Bindings.chunks_(2)) {

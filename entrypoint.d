@@ -14,6 +14,7 @@ import X86_ = x86generator;
 void main() {
 	writeln_(`sse41_enabled: `, sse41_);
 
+	//test();
 
 	writeln_(`.`);
 	writeln_(`success`);
@@ -37,21 +38,40 @@ unittest {
 };
 
 unittest {
-	/* basic quote test */
+	/* unquote test */
 	Valº_[] Forms = Parser_.source_to_forms(q"{
-		.q\.env
+
+		.env.def(:asdf .empty-aa_.asoc(:macro :t)
+			.fn_(_ (x)
+				.q\.let_((y 55)
+					y.cmpr(.uq\x)
+				)
+			)
+		)
+
+		.let_((y 0)
+			asdf(y)
+		)
+
 	}"d);
 
 	auto Rt = Rt_.RuntimeStateº(0);
 	auto Ns = Rt_.root_namespace(&Rt);
-	auto Ir = Ir_.form_to_ir(Ns, Forms[0]);
 
-	Valº_ Chunk = X86_.gen_chunk(&Rt, Ns, Ir);
+	{
+		auto Ir = Ir_.form_to_ir(Ns, Forms[0]);
+		Valº_ Chunk = X86_.gen_chunk(&Rt, Ns, Ir);
+		assert(Chunk.voke() is Valº_.init);
+	};
 
-	auto Result = Chunk.voke();
-	assert(C_.is_symbol(Result));
-	assert(cast(C_.Symbolº*) &Result);
-	assert((cast(C_.Symbolº) Result) == C_.Symbolº(`.env`));
+	{
+		auto Ir = Ir_.form_to_ir(Ns, Forms[1]);
+		Valº_ Chunk = X86_.gen_chunk(&Rt, Ns, Ir);
+
+		auto Result = Chunk.voke();
+		assert(C_.is_int64(Result));
+		assert((cast(C_.Int64º) Result) == C_.Int64º(1));
+	};
 };
 
 unittest {
@@ -60,7 +80,7 @@ unittest {
 	auto Ns = Rt_.root_namespace(&Rt);
 
 	Valº_[] Forms = Parser_.source_to_forms(q"{
-		.env.def(.str->atom(`.aa`) .n
+		.env.def(.utf8->atom(`.aa`) .n
 			.fn_(rec (. xs)
 				.if_(xs.len.=.0
 					.empty-aa_

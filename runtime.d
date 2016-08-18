@@ -44,7 +44,7 @@ C_.Namespaceº root_namespace(RuntimeStateº* Rt) out (Ns) {
 	assert(Ns.SelfSym == C_.Symbolº(Lang_.CoreNameTbl.EnvNs));
 	assert(!Ns.HasParent);
 } body {
-	auto Ns = C_.namespace(Lang_.CoreNameTbl.EnvNs);
+	auto Ns = C_.Namespaceº(Lang_.CoreNameTbl.EnvNs);
 
 	alias Ctbl = Lang_.CoreNameTbl;
 
@@ -59,7 +59,7 @@ C_.Namespaceº root_namespace(RuntimeStateº* Rt) out (Ns) {
 		cast(C_.Funcº) &form_to_chunk!(), null, Rt
 	));
 
-	Ns.define(Ctbl.Array1, Valº_(cast(C_.Funcº) &array1!()));
+	Ns.define(Ctbl.ArrayOf, Valº_(cast(C_.Funcº) &array_of!()));
 	Ns.define(
 		Ctbl.SplicingInvocation,
 		Valº_(cast(C_.Funcº) &splicing_invocation!())
@@ -78,7 +78,7 @@ C_.Namespaceº root_namespace(RuntimeStateº* Rt) out (Ns) {
 struct SeqRangeº {
 	Valº_ Seq;
 	@property bool empty() {
-		return Seq.voke(C_.Atomº(`front?`)) !is Valº_.init;
+		return Seq.voke(C_.Atomº(`front?`)) is Valº_.init;
 	};
 	@property Valº_ front() {
 		return Seq.voke(C_.Atomº(`front`));
@@ -171,16 +171,16 @@ extern(C) Valº_ str_to_atom()(size_t ArgC, Valº_, C_.Utf8º S) in {
 	return C_.Atomº(S.Txt);
 };
 
-extern(C) Valº_ array1()(size_t ArgC, Valº_, Valº_ Elem) in {
-	assert(ArgC == 2);
+extern(C) Valº_ array_of()(size_t ArgC, Valº_, Valº_ Elems /* ... */) in {
+	assert(ArgC >= 1);
 } body {
-	return C_.Csliceº.of(Elem);
+	return C_.Csliceº.from((&Elems)[0 .. ArgC - 1]);
 };
 
 extern(C) Valº_ splicing_invocation()(
 	size_t ArgC, Valº_, Valº_ Invokee, Valº_ Seqs
 ) in {
-	assert(ArgC >= 2);
+	assert(ArgC == 3);
 	assert(C_.is_cslice(Seqs));
 } body {
 	/* extracts parameters from Seqs to create an invocation form. */
@@ -191,7 +191,8 @@ extern(C) Valº_ splicing_invocation()(
 		Invokee,
 		(cast(C_.Csliceº) Seqs).Elems
 			.map_!(X => SeqRangeº(X))
-			.join_
+			.joiner_
+			.array_
 	);
 };
 
@@ -224,6 +225,16 @@ extern(C) Valº_ quote_form()(size_t ArgC, Valº_, Valº_ Form) in {
 			)
 		);
 
+	} else if (C_.is_cslice(Form)) {
+		auto Arr = cast(C_.Csliceº) Form;
+		/* `(x y z)` becomes `.arr-of_(.q\x .q\y .q\z)` */
+		return C_.Invocationº(
+			C_.Symbolº(Lang_.CoreNameTbl.ArrayOf),
+			Arr.Elems.map_!(X => C_.Invocationº(
+				C_.Symbolº(Lang_.CoreNameTbl.Quote), only_(X)
+			))
+		);
+
 	} else if (C_.is_invocation(Form)) {
 		auto V = cast(C_.Invocationº) Form;
 
@@ -252,7 +263,7 @@ extern(C) Valº_ quote_form()(size_t ArgC, Valº_, Valº_ Form) in {
 						`unquote expected 1 parameter`
 					);
 					return C_.Invocationº(
-						C_.Symbolº(Lang_.CoreNameTbl.Array1),
+						C_.Symbolº(Lang_.CoreNameTbl.ArrayOf),
 						only_(V.Params[0])
 					);
 
@@ -267,7 +278,7 @@ extern(C) Valº_ quote_form()(size_t ArgC, Valº_, Valº_ Form) in {
 
 			/* `foo` becomes `.list(.q\foo)`, more or less */
 			return C_.Invocationº(
-				C_.Symbolº(Lang_.CoreNameTbl.Array1),
+				C_.Symbolº(Lang_.CoreNameTbl.ArrayOf),
 				only_(C_.Invocationº(
 					C_.Symbolº(Lang_.CoreNameTbl.Quote),
 					only_(Form)
@@ -279,11 +290,14 @@ extern(C) Valº_ quote_form()(size_t ArgC, Valº_, Valº_ Form) in {
 		return C_.Invocationº(
 			C_.Symbolº(Lang_.CoreNameTbl.SplicingInvocation),
 			only_(
-				cast(Valº_) C_.Invocationº(
+				C_.Invocationº(
 					C_.Symbolº(Lang_.CoreNameTbl.Quote),
 					only_(V.Invokee)
 				),
-				cast(Valº_) C_.Csliceº(V.Params.map_!(quote_param).array_)
+				C_.Invocationº(
+					C_.Symbolº(Lang_.CoreNameTbl.ArrayOf),
+					V.Params.map_!quote_param
+				)
 			)
 		);
 
@@ -305,28 +319,7 @@ struct MmapCodeAllocator {
 		void[] Mem = MmapAllocator_.instance.allocate(Sz);
 		if (!Mem) {return [];};
 
-		version (Posix) {
-			import Mem_ = core.sys.posix.sys.mman;
-			enforce_(Mem_.mprotect(
-				Mem.ptr,
-				Sz,
-				Mem_.PROT_EXEC|Mem_.PROT_READ|Mem_.PROT_WRITE
-			) == 0);
-
-		} else version (Windows) {
-			import W32_ = core.sys.windows.windows;
-			size_t Prev;
-			enforce_(W32_.VirtualProtect(
-				Mem.ptr,
-				Sz,
-				W32_.PAGE_EXECUTE_READWRITE,
-				&Prev
-			));
-
-		} else {
-			static assert(0, `cannot allocate executable memory on this OS`);
-		};
-
+		Misc_.set_page_access(Mem, Misc_.PageAllAccess);
 		return Mem;
 	};
 

@@ -80,12 +80,14 @@ private struct PkgsØ {
 
 	import std_demangle = std.demangle;
 
+	version (none) {
 	import std_digest_crc = std.digest.crc;
 	import std_digest_digest = std.digest.digest;
 	import std_digest_hmac = std.digest.hmac;
 	import std_digest_md = std.digest.md;
 	import std_digest_ripemd = std.digest.ripemd;
 	import std_digest_sha = std.digest.sha;
+	};
 
 	import std_encoding = std.encoding;
 
@@ -135,8 +137,8 @@ private struct PkgsØ {
 
 	import std_mmfile = std.mmfile;
 
-	//import std_net_curl = std.net.curl;
-	//import std_net_isemail = std.net.isemail;
+	version (none) import std_net_curl = std.net.curl;
+	version (none) import std_net_isemail = std.net.isemail;
 
 	import std_numeric = std.numeric;
 
@@ -182,9 +184,9 @@ private struct PkgsØ {
 
 	import std_variant = std.variant;
 
-	//import std_xml = std.xml;
+	version (none) import std_xml = std.xml;
 
-	//import std_zip = std.zip;
+	version (none) import std_zip = std.zip;
 
 	import std_zlib = std.zlib;
 };
@@ -219,5 +221,13 @@ private enum codegenØ = {
 };
 
 mixin(codegenØ());
+
+public import std.format :
+	format_ = format,
+	sformat_ = sformat,
+	formattedRead_ = formattedRead,
+	formattedWrite_ = formattedWrite,
+	singleSpec_ = singleSpec
+;
 
 /* -------------------------------------------------------------------------- */

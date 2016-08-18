@@ -46,17 +46,17 @@ enum CoreNameTbl : string {
 	Apply = `.apply`,
 
 	AtomToSym = `.atom->sym`,
-	StrToAtom = `.str->atom`,
+	StrToAtom = `.utf8->atom`,
 
 	EmptyArray = `.empty-arr_`,
 	EmptyDict = `.empty-aa_`,
 
-	ParseSrc = `.str->forms`,
+	ParseSrc = `.utf8->forms`,
 	CompileForm = `.form->chunk`,
 
 	/* used by unquote */
 	SplicingInvocation = `.q-voke*_`,
-	Array1 = `.ar1_`,
+	ArrayOf = `.arr-of_`,
 };
 
 /* -------------------------------------------------------------------------- */
